@@ -18,6 +18,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [esp32s3-tpager, native, native-headless]
 
     steps:
       - name: Checkout (with submodules)
@@ -34,26 +37,47 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: ${{ runner.os }}-pio-${{ hashFiles('firmware/platformio.ini') }}
+          key: ${{ runner.os }}-pio-${{ matrix.env }}-${{ hashFiles('firmware/platformio.ini') }}
           restore-keys: |
-            ${{ runner.os }}-pio-
+            ${{ runner.os }}-pio-${{ matrix.env }}-
 
       - name: Install PlatformIO
         run: pip install -U platformio
 
-      - name: Build firmware (patch + build)
+      - name: Build (${{ matrix.env }})
         working-directory: firmware
-        run: pio run -e esp32s3-tpager
-        # patch_libnet80211.py runs automatically as a pre-build
-        # extra_script (defined in platformio.ini). No extra step needed.
+        run: pio run -e ${{ matrix.env }}
+        # patch_libnet80211.py runs automatically as a pre-build extra_script.
+        # On native targets the patch is a no-op (guarded by chip detection).
 
       - name: Locate artifact
         id: artifact
         working-directory: firmware
         run: |
-          BIN=$(ls bin/BeamStalker-*.bin | head -1)
+          BIN=$(ls bin/BeamStalker-*-${{ matrix.env == 'esp32s3-tpager' && 'tpager' || matrix.env }}.bin 2>/dev/null | head -1)
+          # post_build.py names native bins with the last env segment too
+          if [ -z "$BIN" ]; then
+            BIN=$(ls bin/BeamStalker-*.bin | head -1)
+          fi
           echo "path=firmware/${BIN}" >> "$GITHUB_OUTPUT"
-          echo "name=$(basename ${BIN})" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename ${BIN})"  >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.artifact.outputs.path }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -61,6 +85,6 @@ jobs:
           tag_name: ${{ inputs.tag }}
           name: BeamStalker ${{ inputs.tag }}
           body: ${{ inputs.notes }}
-          files: ${{ steps.artifact.outputs.path }}
+          files: artifacts/*
           draft: false
           prerelease: false
