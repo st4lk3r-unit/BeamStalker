@@ -11,6 +11,11 @@ on:
         description: 'Release notes / changelog'
         required: true
         type: string
+      latest:
+        description: 'Mark as latest release'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -40,10 +45,11 @@ jobs:
           key: ${{ runner.os }}-pio-${{ matrix.env }}-${{ hashFiles('firmware/platformio.ini') }}
           restore-keys: |
             ${{ runner.os }}-pio-${{ matrix.env }}-
-            
+
       - name: Install SDL2 (native only)
         if: matrix.env == 'native'
         run: sudo apt-get install -y libsdl2-dev
+
       - name: Install PlatformIO
         run: pip install -U platformio
 
@@ -91,3 +97,4 @@ jobs:
           files: artifacts/*
           draft: false
           prerelease: false
+          make_latest: ${{ inputs.latest }}
