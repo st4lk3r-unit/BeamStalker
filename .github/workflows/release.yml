@@ -40,7 +40,10 @@ jobs:
           key: ${{ runner.os }}-pio-${{ matrix.env }}-${{ hashFiles('firmware/platformio.ini') }}
           restore-keys: |
             ${{ runner.os }}-pio-${{ matrix.env }}-
-
+            
+      - name: Install SDL2 (native only)
+        if: matrix.env == 'native'
+        run: sudo apt-get install -y libsdl2-dev
       - name: Install PlatformIO
         run: pip install -U platformio
 
