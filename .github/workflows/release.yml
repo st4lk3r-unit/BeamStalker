@@ -48,7 +48,7 @@ jobs:
 
       - name: Install SDL2 (native only)
         if: matrix.env == 'native'
-        run: sudo apt-get install --fix-missing -y libsdl2-dev
+        run: sudo apt-get update && sudo apt-get install --fix-missing -y libsdl2-dev
 
       - name: Install PlatformIO
         run: pip install -U platformio
