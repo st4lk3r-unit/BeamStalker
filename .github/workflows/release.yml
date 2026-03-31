@@ -1,0 +1,66 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.3.16)'
+        required: true
+        type: string
+      notes:
+        description: 'Release notes / changelog'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: ${{ runner.os }}-pio-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
+
+      - name: Install PlatformIO
+        run: pip install -U platformio
+
+      - name: Build firmware (patch + build)
+        working-directory: firmware
+        run: pio run -e esp32s3-tpager
+        # patch_libnet80211.py runs automatically as a pre-build
+        # extra_script (defined in platformio.ini). No extra step needed.
+
+      - name: Locate artifact
+        id: artifact
+        working-directory: firmware
+        run: |
+          BIN=$(ls bin/BeamStalker-*.bin | head -1)
+          echo "path=firmware/${BIN}" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename ${BIN})" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: BeamStalker ${{ inputs.tag }}
+          body: ${{ inputs.notes }}
+          files: ${{ steps.artifact.outputs.path }}
+          draft: false
+          prerelease: false

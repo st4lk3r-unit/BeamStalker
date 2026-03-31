@@ -1,0 +1,201 @@
+/*
+ * bs_gfx_sgfx.c - bs_gfx backend for hardware displays via SGFX.
+ *
+ * Uses the SGFX framebuffer + presenter pattern:
+ *   - Persistent sgfx_fb_t / sgfx_present_t (allocated once at init)
+ *   - Each draw call modifies the fb and marks dirty tiles
+ *   - bs_gfx_present() → sgfx_present_frame() pushes only changed tiles
+ *
+ * Text rendering: sgfx_font5x7_get() + manual pixel fill into FB.
+ * This matches the example_wrapup pattern and works reliably on all panels.
+ *
+ * Requires: -DBS_USE_SGFX, -DSGFX_W, -DSGFX_H, and bus/driver flags.
+ */
+#ifdef BS_USE_SGFX
+
+#include "bs/bs_gfx.h"
+#include "sgfx.h"
+#include "sgfx_port.h"
+#include "sgfx_fb.h"
+#include "sgfx_font_builtin.h"
+
+#include <string.h>
+#include <stdlib.h>
+
+/* ---- scratch buffer for SGFX HAL (bus DMA staging) ------------------- */
+#ifndef BS_SGFX_SCRATCH_BYTES
+#  ifdef SGFX_SCRATCH_BYTES
+#    define BS_SGFX_SCRATCH_BYTES SGFX_SCRATCH_BYTES
+#  else
+#    define BS_SGFX_SCRATCH_BYTES 8192
+#  endif
+#endif
+
+static uint8_t        s_scratch[BS_SGFX_SCRATCH_BYTES];
+static sgfx_device_t  s_dev;
+static sgfx_fb_t      s_fb;
+static sgfx_present_t s_pr;
+static int            s_w, s_h;
+static bool           s_ready = false;
+
+/* ---- internal FB helpers --------------------------------------------- */
+
+static inline uint16_t pack565(bs_color_t c) {
+    return (uint16_t)(((c.r & 0xF8u) << 8) | ((c.g & 0xFCu) << 3) | (c.b >> 3));
+}
+
+static void fb_fill(int x, int y, int w, int h, bs_color_t c) {
+    if (!s_fb.px || w <= 0 || h <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > s_w) w = s_w - x;
+    if (y + h > s_h) h = s_h - y;
+    if (w <= 0 || h <= 0) return;
+
+    uint16_t v = pack565(c);
+    for (int j = 0; j < h; j++) {
+        uint16_t* row = (uint16_t*)((uint8_t*)s_fb.px + (size_t)(y + j) * (size_t)s_fb.stride) + x;
+        for (int i = 0; i < w; i++) row[i] = v;
+    }
+    sgfx_fb_mark_dirty_px(&s_fb, x, y, w, h);
+}
+
+static void fb_clear_all(bs_color_t c) {
+    fb_fill(0, 0, s_w, s_h, c);
+}
+
+/* ---- 5×7 text into framebuffer --------------------------------------- */
+
+/*
+ * Each glyph: 5 columns, 7 rows.  advance = 6 px (5 + 1 gap).
+ * scale multiplies both axes.  Renders into FB pixel buffer directly.
+ */
+static void fb_text5x7(int x, int y, const char* s, bs_color_t c, int scale) {
+    if (!s_fb.px || !s || scale < 1) return;
+    for (; *s; ++s, x += 6 * scale) {
+        uint8_t cols[5];
+        if (!sgfx_font5x7_get(*s, cols)) continue;
+        for (int col = 0; col < 5; col++) {
+            for (int row = 0; row < 7; row++) {
+                if (cols[col] & (uint8_t)(1u << row)) {
+                    fb_fill(x + col * scale, y + row * scale, scale, scale, c);
+                }
+            }
+        }
+    }
+}
+
+/* ---- bs_gfx API ------------------------------------------------------- */
+
+int bs_gfx_init(const bs_arch_t* arch) {
+    (void)arch;
+    int rc = sgfx_autoinit(&s_dev, s_scratch, sizeof s_scratch);
+    if (rc) return rc;
+
+    s_w = (int)s_dev.caps.width;
+    s_h = (int)s_dev.caps.height;
+
+    rc = sgfx_fb_create(&s_fb, s_w, s_h, 16, 16);
+    if (rc || !s_fb.px) {
+        /* Fallback: no PSRAM - graceful degradation (direct draw, no partial updates) */
+        s_ready = false;
+        return -1;
+    }
+    sgfx_present_init(&s_pr, s_w);
+
+    /* Clear to black */
+    fb_clear_all(BS_COL_BG);
+    sgfx_present_frame(&s_pr, &s_dev, &s_fb);
+
+    s_ready = true;
+    return 0;
+}
+
+void bs_gfx_deinit(void) {
+    if (s_ready) {
+        sgfx_present_deinit(&s_pr);
+        sgfx_fb_destroy(&s_fb);
+        s_ready = false;
+    }
+}
+
+int bs_gfx_width(void)  { return s_w; }
+int bs_gfx_height(void) { return s_h; }
+
+void bs_gfx_clear(bs_color_t c) {
+    if (!s_ready) return;
+    fb_clear_all(c);
+}
+
+void bs_gfx_fill_rect(int x, int y, int w, int h, bs_color_t c) {
+    if (!s_ready) return;
+    fb_fill(x, y, w, h, c);
+}
+
+void bs_gfx_hline(int x, int y, int w, bs_color_t c) {
+    if (!s_ready) return;
+    fb_fill(x, y, w, 1, c);
+}
+
+void bs_gfx_bitmap_1bpp(int x, int y, int w, int h,
+                          const uint8_t* data, bs_color_t fg, int scale, int step) {
+    if (!s_ready || !data || scale < 1) return;
+    if (step < 1) step = 1;
+    int stride = (w + 7) / 8;
+    int out_h = (h + step - 1) / step;
+    int out_w = (w + step - 1) / step;
+    for (int oy = 0; oy < out_h; oy++) {
+        for (int ox = 0; ox < out_w; ox++) {
+            int hit = 0;
+            for (int sy = 0; sy < step && !hit; sy++) {
+                int row = oy * step + sy;
+                if (row >= h) break;
+                for (int sx = 0; sx < step && !hit; sx++) {
+                    int col = ox * step + sx;
+                    if (col >= w) break;
+                    if ((data[row * stride + col / 8] >> (7 - (col & 7))) & 1u)
+                        hit = 1;
+                }
+            }
+            if (hit)
+                fb_fill(x + ox * scale, y + oy * scale, scale, scale, fg);
+        }
+    }
+}
+
+void bs_gfx_text(int x, int y, const char* s, bs_color_t c, int scale) {
+    if (!s_ready) return;
+    if (scale < 1) scale = 1;
+    fb_text5x7(x, y, s, c, scale);
+}
+
+int bs_gfx_text_w(const char* s, int scale) {
+    if (!s || scale < 1) return 0;
+    int n = 0;
+    while (*s++) n++;
+    return n * 6 * scale;   /* 5px glyph + 1px gap per char */
+}
+
+int bs_gfx_text_h(int scale) {
+    return 7 * (scale < 1 ? 1 : scale);
+}
+
+void bs_gfx_present(void) {
+    if (!s_ready) return;
+    sgfx_present_frame(&s_pr, &s_dev, &s_fb);
+}
+
+/*
+ * bs_gfx_backlight_hw - platform-specific backlight control.
+ * Weak no-op; override in a dedicated backlight driver file
+ * (e.g. bs_gfx_backlight_aw9364.c for the T-Pager AW9364 chip).
+ */
+__attribute__((weak)) void bs_gfx_backlight_hw(int pct) { (void)pct; }
+
+void bs_gfx_set_brightness(int pct) {
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+    bs_gfx_backlight_hw(pct);
+}
+
+#endif /* BS_USE_SGFX */
