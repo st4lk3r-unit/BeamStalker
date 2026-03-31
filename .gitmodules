@@ -1,0 +1,9 @@
+[submodule "firmware/lib/SGFX"]
+	path = firmware/lib/SGFX
+	url = https://github.com/st4lk3r-unit/SGFX
+[submodule "firmware/lib/SIC"]
+	path = firmware/lib/SIC
+	url = https://github.com/st4lk3r-unit/SIC
+[submodule "firmware/lib/konsole"]
+	path = firmware/lib/konsole
+	url = https://github.com/st4lk3r-unit/konsole
