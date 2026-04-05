@@ -139,8 +139,9 @@ static void app_wifi_run(const bs_arch_t* arch) {
     int  cursor  = 0;
     bool dirty   = true;
 
-    /* WiFi is initialised at boot (beamstalker.c). Check caps. */
-    bool caps_ok = (bs_wifi_caps() & (BS_WIFI_CAP_INJECT | BS_WIFI_CAP_SNIFF)) != 0;
+    int err = bs_wifi_init(arch);
+    bool caps_ok = (err == 0) &&
+                   (bs_wifi_caps() & (BS_WIFI_CAP_INJECT | BS_WIFI_CAP_SNIFF)) != 0;
 
     for (;;) {
         bs_nav_id_t nav;
@@ -160,6 +161,7 @@ static void app_wifi_run(const bs_arch_t* arch) {
                     }
                     break;
                 case BS_NAV_BACK:
+                    bs_wifi_deinit();
                     return;
                 default: break;
             }

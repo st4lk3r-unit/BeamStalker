@@ -9,8 +9,10 @@
  *   4. konsole (UART CLI; always on UART/stdin+stdout)
  *   5. bs_log (routes to konsole + display)
  *   6. bs_debug (FPS/heap overlay)
- *   7. SIC hardware (keyboard, audio, battery … - hardware targets only)
- *   8. bs_boot_run()   - animated boot sequence         [skipped if BS_HEADLESS]
+ *   7. BLE stack (before WiFi — coex controller must start in BT+WiFi mode)
+ *   8. WiFi stack
+ *   9. SIC hardware (keyboard, audio, battery … - hardware targets only)
+ *  10. bs_boot_run()   - animated boot sequence         [skipped if BS_HEADLESS]
  *   9. bs_theme_set()  - apply default theme
  *  10. bs_menu_init()  - set up app menu                [skipped if BS_HEADLESS]
  *
@@ -24,6 +26,7 @@
  *   BS_NO_APP_LOG    - exclude Log app
  *   BS_NO_APP_TOP    - exclude Top app
  *   BS_NO_APP_WIFI   - exclude WiFi app (auto-excluded if no WiFi backend)
+ *   BS_NO_APP_BLE    - exclude BLE app  (auto-excluded if no BLE backend)
  *   (app_settings is always included)
  */
 #include "beamstalker.h"
@@ -54,6 +57,10 @@
 #include "bs/bs_wifi.h"   /* defines BS_HAS_WIFI when a backend is active */
 #if defined(BS_HAS_WIFI) && !defined(BS_NO_APP_WIFI)
 #  include "apps/app_wifi.h"
+#endif
+#include "bs/bs_ble.h"    /* defines BS_HAS_BLE  when a backend is active */
+#if defined(BS_HAS_BLE) && !defined(BS_NO_APP_BLE)
+#  include "apps/app_ble.h"
 #endif
 
 #include "konsole/konsole.h"
@@ -115,6 +122,9 @@ static void boot_idle_poll(void) {
 static const bs_app_t* const k_apps[] = {
 #if defined(BS_HAS_WIFI) && !defined(BS_NO_APP_WIFI)
     &app_wifi,
+#endif
+#if defined(BS_HAS_BLE) && !defined(BS_NO_APP_BLE)
+    &app_ble,
 #endif
 #ifndef BS_NO_APP_LOG
     &app_log,
@@ -342,13 +352,38 @@ void bs_init(void) {
     /* Debug overlay */
     bs_debug_init(s_arch);
 
-    /* WiFi — init before SIC+SD.  With PSRAM online (BOARD_HAS_PSRAM +
-     * qio_qspi SDK), the 213 KB framebuffer lives in PSRAM and
-     * CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP routes WiFi allocs to PSRAM too,
-     * so internal SRAM stays nearly untouched for SIC + SD.                */
+    /* Radio probe — init each stack sequentially to verify hardware, log the
+     * result, then deinit.  On ESP32 the coexistence controller aborts if two
+     * stacks are active simultaneously, so we never overlap them.  Each app
+     * re-inits its own stack on entry and deinits it on BACK.               */
+    bool probe_ble_ok  = false;
+    bool probe_wifi_ok = false;
+
+#ifdef BS_HAS_BLE
+    {
+        int berr = bs_ble_init(s_arch);
+        probe_ble_ok = (berr == 0);
+        if (berr == 0) {
+            uint32_t bcaps = bs_ble_caps();
+            BS_LOGOK("ble", "caps=0x%02X  (adv=%s scan=%s rand=%s)",
+                     (unsigned)bcaps,
+                     (bcaps & BS_BLE_CAP_ADVERTISE) ? "Y" : "N",
+                     (bcaps & BS_BLE_CAP_SCAN)      ? "Y" : "N",
+                     (bcaps & BS_BLE_CAP_RAND_ADDR) ? "Y" : "N");
+        } else {
+            BS_LOGBF("ble", "probe failed (%d)", berr);
+        }
+        bs_ble_deinit();
+        /* Give the coexistence controller time to settle before WiFi init.
+         * Without this delay, esp_wifi_init() fails because the coex state
+         * machine is still in BT teardown when WiFi tries to join it.        */
+        s_arch->delay_ms(200);
+    }
+#endif
 #ifdef BS_HAS_WIFI
     {
         int werr = bs_wifi_init(s_arch);
+        probe_wifi_ok = (werr == 0);
         if (werr == 0) {
             uint32_t wcaps = bs_wifi_caps();
             BS_LOGOK("wifi", "caps=0x%02X  (inject=%s sniff=%s scan=%s)",
@@ -357,10 +392,13 @@ void bs_init(void) {
                      (wcaps & BS_WIFI_CAP_SNIFF)  ? "Y" : "N",
                      (wcaps & BS_WIFI_CAP_SCAN)   ? "Y" : "N");
         } else {
-            BS_LOGBF("wifi", "init failed (%d)", werr);
+            BS_LOGBF("wifi", "probe failed (%d)", werr);
         }
+        bs_wifi_deinit();
     }
 #endif
+
+    bs_boot_set_probe(probe_wifi_ok, probe_ble_ok);
 
 #ifdef BS_USE_SIC
     /* SIC must init before fs: XL9555 GPIO14 (SD power enable) is set by preinit */
