@@ -131,33 +131,38 @@ extern "C" int bs_wifi_init(const bs_arch_t* arch) {
     if (!s_sta_netif)
         s_sta_netif = esp_netif_create_default_wifi_sta();
 
-    /* Clean up any previous partial init before calling esp_wifi_init(). */
-    esp_wifi_stop();
-    esp_wifi_deinit();
+    /* On ESP-IDF 4.4, esp_wifi_deinit() leaves allocator state that makes a
+     * subsequent esp_wifi_init() fail.  bs_wifi_deinit() therefore keeps the
+     * driver allocated (stop-only).  Detect that case: if esp_wifi_get_mode()
+     * succeeds the driver is already allocated and we skip esp_wifi_init().  */
+    /* bs_wifi_deinit() keeps the driver allocated (stop-only) to work around
+     * an ESP-IDF 4.4 bug where esp_wifi_deinit() + esp_wifi_init() fails on
+     * re-init.  Only call esp_wifi_init() when the driver is not yet alive.  */
+    wifi_mode_t _mode;
+    if (esp_wifi_get_mode(&_mode) == ESP_ERR_WIFI_NOT_INIT) {
+        /* Dynamic TX buffers: static buffers need ~12.8 KB contiguous SRAM at
+         * init time; after SIC+SD fragment the heap that alloc fails.  Dynamic
+         * buffers allocate on demand and succeed on a fragmented heap.
+         * 32 TX buffers: 16 was too shallow — a single raw-inject burst filled
+         * it, causing subsequent esp_wifi_80211_tx() calls to fail silently.  */
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        cfg.nvs_enable          = 0;
+        cfg.static_tx_buf_num   = 0;
+        cfg.dynamic_tx_buf_num  = 32;
+        cfg.tx_buf_type         = 1;    /* 0=static, 1=dynamic               */
+        cfg.cache_tx_buf_num    = 4;    /* must be non-zero when tx_buf_type=1 */
+        cfg.static_rx_buf_num   = 2;    /* minimum valid value (1 is rejected) */
+        cfg.dynamic_rx_buf_num  = 16;
 
-    /* Dynamic TX buffers: static buffers need ~12.8 KB contiguous SRAM at
-     * init time; after SIC+SD fragment the heap that alloc fails.  Dynamic
-     * buffers allocate on demand and succeed on a fragmented heap.
-     * 32 TX buffers: 16 was too shallow — a single raw-inject burst filled it,
-     * causing subsequent esp_wifi_80211_tx() calls to fail silently.        */
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    cfg.nvs_enable          = 0;
-    cfg.static_tx_buf_num   = 0;
-    cfg.dynamic_tx_buf_num  = 32;
-    cfg.tx_buf_type         = 1;    /* 0=static, 1=dynamic                  */
-    cfg.cache_tx_buf_num    = 4;    /* must be non-zero when tx_buf_type=1  */
-    cfg.static_rx_buf_num   = 2;    /* minimum valid value (1 is rejected)  */
-    cfg.dynamic_rx_buf_num  = 16;
-
-    esp_err_t err = esp_wifi_init(&cfg);
-    if (err != ESP_OK) {
-        printf("[wifi] esp_wifi_init failed: 0x%x (%s)\n",
-               (unsigned)err, esp_err_to_name(err));
-        return -2;
+        esp_err_t err = esp_wifi_init(&cfg);
+        if (err != ESP_OK) {
+            printf("[wifi] esp_wifi_init failed: 0x%x (%s)\n",
+                   (unsigned)err, esp_err_to_name(err));
+            return -2;
+        }
     }
 
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_ev, NULL);
-
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
     esp_wifi_set_ps(WIFI_PS_NONE);
     esp_wifi_set_mode(WIFI_MODE_STA);
@@ -177,7 +182,10 @@ extern "C" void bs_wifi_deinit(void) {
     esp_wifi_set_promiscuous(false);
     esp_wifi_disconnect();
     esp_wifi_stop();
-    esp_wifi_deinit();
+    /* Intentionally NOT calling esp_wifi_deinit() — on ESP-IDF 4.4 a full
+     * deinit leaves internal allocator state that prevents a successful
+     * re-init.  Keeping the driver allocated but stopped (~30 KB) allows
+     * bs_wifi_init() to skip esp_wifi_init() and just call esp_wifi_start(). */
     s_state     = BS_WIFI_STATE_OFF;
     s_caps      = 0;
     s_frame_cb  = NULL;

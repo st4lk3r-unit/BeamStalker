@@ -25,6 +25,12 @@
 #include <stddef.h>
 #include "bs_arch.h"
 
+/* ── Convenience: defined when any real BLE backend is active ──────────── */
+
+#if defined(BS_BLE_ESP32) || defined(BS_BLE_NRF)
+#  define BS_HAS_BLE 1
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

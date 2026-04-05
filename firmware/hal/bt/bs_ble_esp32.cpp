@@ -32,14 +32,19 @@ extern "C" {
 #include "esp_bt.h"
 #include "esp_bt_main.h"      /* esp_bluedroid_init/enable, esp_bt_controller_* */
 #include "esp_gap_ble_api.h"  /* esp_ble_gap_*, esp_power_level_t              */
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 }
 
 /* ── Private state ──────────────────────────────────────────────────────── */
 
-static bool                s_init       = false;
-static bool                s_advertising = false;
-static bs_ble_scan_cb_t    s_scan_cb    = NULL;
-static void*               s_scan_ctx   = NULL;
+static bool                s_init               = false;
+static bool                s_advertising        = false;
+static volatile bool       s_scanning           = false;
+static volatile bool       s_scan_start_pending = false;
+static bs_ble_scan_cb_t    s_scan_cb            = NULL;
+static void*               s_scan_ctx           = NULL;
+static volatile bool       s_addr_set           = false;  /* set by GAP addr-set event */
 
 /* ── dBm → esp_power_level_t ─────────────────────────────────────────────── */
 
@@ -73,6 +78,41 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
             s_scan_cb(&r, s_scan_ctx);
             break;
         }
+        case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
+            if (!s_scan_start_pending) break;
+            if (param->scan_param_cmpl.status != ESP_BT_STATUS_SUCCESS) {
+                s_scan_start_pending = false;
+                s_scan_cb  = NULL;
+                s_scan_ctx = NULL;
+                break;
+            }
+            if (esp_ble_gap_start_scanning(0) != ESP_OK) {
+                s_scan_start_pending = false;
+                s_scan_cb  = NULL;
+                s_scan_ctx = NULL;
+            }
+            break;
+
+        case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
+            if (param->scan_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+                s_scanning = true;
+            } else {
+                s_scan_cb  = NULL;
+                s_scan_ctx = NULL;
+            }
+            s_scan_start_pending = false;
+            break;
+
+        case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
+            s_scanning           = false;
+            s_scan_start_pending = false;
+            s_scan_cb            = NULL;
+            s_scan_ctx           = NULL;
+            break;
+
+        case ESP_GAP_BLE_SET_STATIC_RAND_ADDR_EVT:
+            s_addr_set = true;
+            break;
         default:
             break;
     }
@@ -84,14 +124,26 @@ extern "C" int bs_ble_init(const bs_arch_t* arch) {
     (void)arch;
     if (s_init) return 0;
 
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    if (esp_bt_controller_init(&bt_cfg)   != ESP_OK) return -2;
-    if (esp_bt_controller_enable(ESP_BT_MODE_BLE) != ESP_OK) return -2;
-    if (esp_bluedroid_init()              != ESP_OK) return -2;
-    if (esp_bluedroid_enable()            != ESP_OK) return -2;
+    /* The BT controller may already be initialised (but disabled) from a
+     * previous bs_ble_deinit() call.  We intentionally skip deinit there to
+     * preserve the coexistence framework — see bs_ble_deinit() comment.     */
+    esp_bt_controller_status_t ctrl = esp_bt_controller_get_status();
+    if (ctrl == ESP_BT_CONTROLLER_STATUS_IDLE) {
+        esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+        if (esp_bt_controller_init(&bt_cfg) != ESP_OK) return -2;
+    }
+    if (esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_ENABLED) {
+        if (esp_bt_controller_enable(ESP_BT_MODE_BLE) != ESP_OK) return -2;
+    }
+    if (esp_bluedroid_init()  != ESP_OK) return -2;
+    if (esp_bluedroid_enable() != ESP_OK) return -2;
     if (esp_ble_gap_register_callback(gap_event_handler) != ESP_OK) return -2;
 
-    s_init = true;
+    s_scanning           = false;
+    s_scan_start_pending = false;
+    s_scan_cb            = NULL;
+    s_scan_ctx           = NULL;
+    s_init               = true;
     return 0;
 }
 
@@ -102,8 +154,16 @@ extern "C" void bs_ble_deinit(void) {
     esp_bluedroid_disable();
     esp_bluedroid_deinit();
     esp_bt_controller_disable();
-    esp_bt_controller_deinit();
-    s_init = false;
+    /* Intentionally NOT calling esp_bt_controller_deinit():
+     * on ESP-IDF 4.4 that tears down the shared coexistence framework,
+     * making subsequent esp_wifi_init() fail.  Leaving the controller in
+     * INITED (disabled) state is safe — it holds no TX/RX buffers and the
+     * radio is off; WiFi can still initialise and use the coex scheduler.  */
+    s_scanning           = false;
+    s_scan_start_pending = false;
+    s_scan_cb            = NULL;
+    s_scan_ctx           = NULL;
+    s_init               = false;
 }
 
 extern "C" uint32_t bs_ble_caps(void) {
@@ -114,9 +174,11 @@ extern "C" uint32_t bs_ble_caps(void) {
 
 extern "C" int bs_ble_set_addr(const uint8_t addr[6]) {
     if (!s_init) return -2;
-    /* esp_ble_gap_set_rand_addr takes a non-const pointer */
     uint8_t tmp[6];
     memcpy(tmp, addr, 6);
+    /* Fire-and-forget: the BLE HCI command queue is FIFO, so set_rand_addr
+     * is guaranteed to execute before any subsequent start_advertising call.
+     * No explicit wait needed — vTaskDelay blocking here kills spam throughput. */
     esp_err_t err = esp_ble_gap_set_rand_addr(tmp);
     return (err == ESP_OK) ? 0 : -2;
 }
@@ -182,29 +244,44 @@ extern "C" int bs_ble_adv_update(const bs_ble_adv_data_t* data) {
 
 extern "C" int bs_ble_scan_start(bs_ble_scan_cb_t cb, void* ctx) {
     if (!s_init || !cb) return -2;
-    s_scan_cb  = cb;
-    s_scan_ctx = ctx;
+    if (s_scanning || s_scan_start_pending) return 0;
+
+    s_scan_cb            = cb;
+    s_scan_ctx           = ctx;
+    s_scan_start_pending = true;
 
     esp_ble_scan_params_t scan_params = {};
     scan_params.scan_type          = BLE_SCAN_TYPE_PASSIVE;
-    scan_params.own_addr_type      = BLE_ADDR_TYPE_RANDOM;
+    scan_params.own_addr_type      = BLE_ADDR_TYPE_PUBLIC;  /* no random addr needed for rx */
     scan_params.scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL;
     scan_params.scan_interval      = 0x0050;   /* 50 ms */
     scan_params.scan_window        = 0x0030;   /* 30 ms */
     scan_params.scan_duplicate     = BLE_SCAN_DUPLICATE_DISABLE;
 
     esp_err_t err = esp_ble_gap_set_scan_params(&scan_params);
-    if (err != ESP_OK) return -2;
+    if (err != ESP_OK) {
+        s_scan_start_pending = false;
+        s_scan_cb  = NULL;
+        s_scan_ctx = NULL;
+        return -2;
+    }
 
-    err = esp_ble_gap_start_scanning(0);   /* 0 = scan until stop */
-    return (err == ESP_OK) ? 0 : -2;
+    /* Start scanning from ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT. */
+    return 0;
 }
 
 extern "C" void bs_ble_scan_stop(void) {
     if (!s_init) return;
+
+    if (s_scan_start_pending) {
+        s_scan_start_pending = false;
+        s_scan_cb  = NULL;
+        s_scan_ctx = NULL;
+        return;
+    }
+    if (!s_scanning) return;
+
     esp_ble_gap_stop_scanning();
-    s_scan_cb  = NULL;
-    s_scan_ctx = NULL;
 }
 
 #endif /* ARDUINO_ARCH_ESP32 */

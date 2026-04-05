@@ -1,6 +1,9 @@
 #pragma once
 /*
  * bs_boot.h - BeamStalker boot sequence.
+ */
+#include <stdbool.h>
+/*
  *
  * Displays an elegant Fallout-flavored initialization sequence:
  *   1. BEAMSTALKER ASCII banner (scaled glyph rendering)
@@ -16,6 +19,10 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Store radio probe results before calling bs_boot_run().
+ * wifi_ok / ble_ok: true if the probe init succeeded. */
+void bs_boot_set_probe(bool wifi_ok, bool ble_ok);
 
 /* idle_fn: called each iteration of the "press any key" wait loop.
  * Use to keep the terminal konsole responsive during the UI wait. */
