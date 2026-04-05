@@ -1,0 +1,80 @@
+name: Build Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [esp32s3-tpager, native, native-headless]
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: ${{ runner.os }}-pio-${{ matrix.env }}-${{ hashFiles('firmware/platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-${{ matrix.env }}-
+
+      - name: Install SDL2 (native only)
+        if: matrix.env == 'native'
+        run: sudo apt-get update && sudo apt-get install --fix-missing -y libsdl2-dev
+
+      - name: Install PlatformIO
+        run: pip install -U platformio
+
+      - name: Build (${{ matrix.env }})
+        working-directory: firmware
+        run: pio run -e ${{ matrix.env }}
+
+      - name: Locate artifact
+        id: artifact
+        working-directory: firmware
+        shell: bash
+        run: |
+          case "${{ matrix.env }}" in
+            esp32s3-tpager)
+              BIN="$(ls bin/BeamStalker-*-tpager.bin 2>/dev/null | head -1)"
+              ;;
+            native)
+              BIN="$(ls bin/BeamStalker-*-native.bin 2>/dev/null | head -1)"
+              ;;
+            native-headless)
+              BIN="$(ls bin/BeamStalker-*-native-headless.bin 2>/dev/null | head -1)"
+              ;;
+          esac
+
+          if [ -z "$BIN" ]; then
+            BIN="$(ls bin/BeamStalker-* 2>/dev/null | head -1)"
+          fi
+
+          if [ -z "$BIN" ]; then
+            echo "No artifact found in firmware/bin"
+            exit 1
+          fi
+
+          echo "path=firmware/${BIN}" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$BIN")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.env }}
+          path: ${{ steps.artifact.outputs.path }}
