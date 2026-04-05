@@ -157,7 +157,7 @@ bool bs_keys_poll(bs_key_t* out) {
         } else if (kbd->keymap) {
             ch = kbd->keymap(i);
         }
-        if (!ch) return false;
+        if (!ch) continue;
 
         if (shift && ch >= 'a' && ch <= 'z') ch = (char)(ch - 32);
         if (ch == SIC_KEY_CAPS_LOCK) return false;

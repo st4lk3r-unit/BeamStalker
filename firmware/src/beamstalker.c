@@ -9,10 +9,8 @@
  *   4. konsole (UART CLI; always on UART/stdin+stdout)
  *   5. bs_log (routes to konsole + display)
  *   6. bs_debug (FPS/heap overlay)
- *   7. BLE stack (before WiFi — coex controller must start in BT+WiFi mode)
- *   8. WiFi stack
- *   9. SIC hardware (keyboard, audio, battery … - hardware targets only)
- *  10. bs_boot_run()   - animated boot sequence         [skipped if BS_HEADLESS]
+ *   7. SIC hardware (keyboard, audio, battery … - hardware targets only)
+ *   8. bs_boot_run()   - animated boot sequence         [skipped if BS_HEADLESS]
  *   9. bs_theme_set()  - apply default theme
  *  10. bs_menu_init()  - set up app menu                [skipped if BS_HEADLESS]
  *
@@ -26,7 +24,6 @@
  *   BS_NO_APP_LOG    - exclude Log app
  *   BS_NO_APP_TOP    - exclude Top app
  *   BS_NO_APP_WIFI   - exclude WiFi app (auto-excluded if no WiFi backend)
- *   BS_NO_APP_BLE    - exclude BLE app  (auto-excluded if no BLE backend)
  *   (app_settings is always included)
  */
 #include "beamstalker.h"
@@ -58,10 +55,6 @@
 #if defined(BS_HAS_WIFI) && !defined(BS_NO_APP_WIFI)
 #  include "apps/app_wifi.h"
 #endif
-#include "bs/bs_ble.h"    /* defines BS_HAS_BLE  when a backend is active */
-#if defined(BS_HAS_BLE) && !defined(BS_NO_APP_BLE)
-#  include "apps/app_ble.h"
-#endif
 
 #include "konsole/konsole.h"
 #include "konsole/static.h"   /* struct kon_line_state */
@@ -69,10 +62,12 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* ---- Optional SIC ----------------------------------------------------- */
 #ifdef BS_USE_SIC
 #  include <sic/sic.h>
+#  include <sic/input/kscan.h>
 #endif
 
 /* ---- ESP log hook (captures [E][sd_diskio...] into bs_log ring) -------- */
@@ -122,9 +117,6 @@ static void boot_idle_poll(void) {
 static const bs_app_t* const k_apps[] = {
 #if defined(BS_HAS_WIFI) && !defined(BS_NO_APP_WIFI)
     &app_wifi,
-#endif
-#if defined(BS_HAS_BLE) && !defined(BS_NO_APP_BLE)
-    &app_ble,
 #endif
 #ifndef BS_NO_APP_LOG
     &app_log,
@@ -208,6 +200,7 @@ static int cmd_hw(struct konsole* ks, int argc, char** argv) {
 #endif
     }
 
+#if defined(VARIANT_TPAGER)
     /* XL9555 GPIO expander diagnostic */
     {
         bs_hw_xl9555_t xl;
@@ -226,6 +219,7 @@ static int cmd_hw(struct konsole* ks, int argc, char** argv) {
                        sd_out ? "out" : "BUG:in");
         }
     }
+#endif
 
     kon_printf(ks, "  Up    : %.1f s\r\n", (float)s_arch->millis() / 1000.0f);
     return 0;
@@ -276,6 +270,53 @@ static int bs_stricmp(const char* a, const char* b) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+
+static int cmd_kbd(struct konsole* ks, int argc, char** argv) {
+#ifdef BS_USE_SIC
+    const kscan_t* kbd = sic_kbd(0);
+    if (!kbd) {
+        kon_printf(ks, "kbd: no SIC keyboard backend\r\n");
+        return 1;
+    }
+
+    int watch_ms = 0;
+    if (argc >= 3 && strcmp(argv[1], "watch") == 0) watch_ms = atoi(argv[2]);
+    else if (argc >= 2 && strcmp(argv[1], "watch") == 0) watch_ms = 5000;
+
+    unsigned long t0 = s_arch->millis();
+    unsigned long long prev = ~0ULL;
+    do {
+        unsigned long long bm = 0ULL;
+        if (kscan_read_bitmap(kbd, &bm) < 0) {
+            kon_printf(ks, "kbd: bitmap read failed\r\n");
+            return 1;
+        }
+        if (bm != prev) {
+            prev = bm;
+            kon_printf(ks, "kbd: bitmap=0x%08lX%08lX\r\n",
+                       (unsigned long)(bm >> 32), (unsigned long)(bm & 0xFFFFFFFFu));
+            int any = 0;
+            for (int i = 0; i < 56; ++i) {
+                if (!(bm & (1ULL << i))) continue;
+                any = 1;
+                char ch = (kbd->keymap ? kbd->keymap(i) : 0);
+                if (ch >= 0x20 && ch < 0x7F)
+                    kon_printf(ks, "  idx=%d ch='%c' (0x%02X)\r\n", i, ch, (unsigned char)ch);
+                else
+                    kon_printf(ks, "  idx=%d ch=0x%02X\r\n", i, (unsigned char)ch);
+            }
+            if (!any) kon_printf(ks, "  <no keys pressed>\r\n");
+        }
+        if (watch_ms <= 0) break;
+        s_arch->delay_ms(25);
+    } while ((int)(s_arch->millis() - t0) < watch_ms);
+    return 0;
+#else
+    (void)ks; (void)argc; (void)argv;
+    return 1;
+#endif
+}
+
 static int cmd_startapp(struct konsole* ks, int argc, char** argv) {
     /* startapp          - show usage
      * startapp --list   - list registered apps
@@ -315,6 +356,7 @@ static const struct kon_cmd k_cmds[] = {
     { "help",         "show commands",              cmd_help         },
     { "hw",           "hardware & system status",   cmd_hw           },
     { "dmesg",        "show log (dmesg flush->SD)", cmd_dmesg        },
+    { "kbd",          "dump keyboard raw state",     cmd_kbd          },
     { "sdformat",     "format SD card as FAT32",    cmd_sdformat     },
     { "startapp",     "launch app by name",         cmd_startapp     },
 };
@@ -352,38 +394,13 @@ void bs_init(void) {
     /* Debug overlay */
     bs_debug_init(s_arch);
 
-    /* Radio probe — init each stack sequentially to verify hardware, log the
-     * result, then deinit.  On ESP32 the coexistence controller aborts if two
-     * stacks are active simultaneously, so we never overlap them.  Each app
-     * re-inits its own stack on entry and deinits it on BACK.               */
-    bool probe_ble_ok  = false;
-    bool probe_wifi_ok = false;
-
-#ifdef BS_HAS_BLE
-    {
-        int berr = bs_ble_init(s_arch);
-        probe_ble_ok = (berr == 0);
-        if (berr == 0) {
-            uint32_t bcaps = bs_ble_caps();
-            BS_LOGOK("ble", "caps=0x%02X  (adv=%s scan=%s rand=%s)",
-                     (unsigned)bcaps,
-                     (bcaps & BS_BLE_CAP_ADVERTISE) ? "Y" : "N",
-                     (bcaps & BS_BLE_CAP_SCAN)      ? "Y" : "N",
-                     (bcaps & BS_BLE_CAP_RAND_ADDR) ? "Y" : "N");
-        } else {
-            BS_LOGBF("ble", "probe failed (%d)", berr);
-        }
-        bs_ble_deinit();
-        /* Give the coexistence controller time to settle before WiFi init.
-         * Without this delay, esp_wifi_init() fails because the coex state
-         * machine is still in BT teardown when WiFi tries to join it.        */
-        s_arch->delay_ms(200);
-    }
-#endif
+    /* WiFi — init before SIC+SD.  With PSRAM online (BOARD_HAS_PSRAM +
+     * qio_qspi SDK), the 213 KB framebuffer lives in PSRAM and
+     * CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP routes WiFi allocs to PSRAM too,
+     * so internal SRAM stays nearly untouched for SIC + SD.                */
 #ifdef BS_HAS_WIFI
     {
         int werr = bs_wifi_init(s_arch);
-        probe_wifi_ok = (werr == 0);
         if (werr == 0) {
             uint32_t wcaps = bs_wifi_caps();
             BS_LOGOK("wifi", "caps=0x%02X  (inject=%s sniff=%s scan=%s)",
@@ -392,13 +409,10 @@ void bs_init(void) {
                      (wcaps & BS_WIFI_CAP_SNIFF)  ? "Y" : "N",
                      (wcaps & BS_WIFI_CAP_SCAN)   ? "Y" : "N");
         } else {
-            BS_LOGBF("wifi", "probe failed (%d)", werr);
+            BS_LOGBF("wifi", "init failed (%d)", werr);
         }
-        bs_wifi_deinit();
     }
 #endif
-
-    bs_boot_set_probe(probe_wifi_ok, probe_ble_ok);
 
 #ifdef BS_USE_SIC
     /* SIC must init before fs: XL9555 GPIO14 (SD power enable) is set by preinit */
