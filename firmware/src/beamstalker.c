@@ -278,52 +278,6 @@ static int bs_stricmp(const char* a, const char* b) {
 }
 
 
-static int cmd_kbd(struct konsole* ks, int argc, char** argv) {
-#ifdef BS_USE_SIC
-    const kscan_t* kbd = sic_kbd(0);
-    if (!kbd) {
-        kon_printf(ks, "kbd: no SIC keyboard backend\r\n");
-        return 1;
-    }
-
-    int watch_ms = 0;
-    if (argc >= 3 && strcmp(argv[1], "watch") == 0) watch_ms = atoi(argv[2]);
-    else if (argc >= 2 && strcmp(argv[1], "watch") == 0) watch_ms = 5000;
-
-    unsigned long t0 = s_arch->millis();
-    unsigned long long prev = ~0ULL;
-    do {
-        unsigned long long bm = 0ULL;
-        if (kscan_read_bitmap(kbd, &bm) < 0) {
-            kon_printf(ks, "kbd: bitmap read failed\r\n");
-            return 1;
-        }
-        if (bm != prev) {
-            prev = bm;
-            kon_printf(ks, "kbd: bitmap=0x%08lX%08lX\r\n",
-                       (unsigned long)(bm >> 32), (unsigned long)(bm & 0xFFFFFFFFu));
-            int any = 0;
-            for (int i = 0; i < 56; ++i) {
-                if (!(bm & (1ULL << i))) continue;
-                any = 1;
-                char ch = (kbd->keymap ? kbd->keymap(i) : 0);
-                if (ch >= 0x20 && ch < 0x7F)
-                    kon_printf(ks, "  idx=%d ch='%c' (0x%02X)\r\n", i, ch, (unsigned char)ch);
-                else
-                    kon_printf(ks, "  idx=%d ch=0x%02X\r\n", i, (unsigned char)ch);
-            }
-            if (!any) kon_printf(ks, "  <no keys pressed>\r\n");
-        }
-        if (watch_ms <= 0) break;
-        s_arch->delay_ms(25);
-    } while ((int)(s_arch->millis() - t0) < watch_ms);
-    return 0;
-#else
-    (void)ks; (void)argc; (void)argv;
-    return 1;
-#endif
-}
-
 static int cmd_startapp(struct konsole* ks, int argc, char** argv) {
     /* startapp          - show usage
      * startapp --list   - list registered apps
@@ -363,7 +317,6 @@ static const struct kon_cmd k_cmds[] = {
     { "help",         "show commands",              cmd_help         },
     { "hw",           "hardware & system status",   cmd_hw           },
     { "dmesg",        "show log (dmesg flush->SD)", cmd_dmesg        },
-    { "kbd",          "dump keyboard raw state",     cmd_kbd          },
     { "sdformat",     "format SD card as FAT32",    cmd_sdformat     },
     { "startapp",     "launch app by name",         cmd_startapp     },
 };
