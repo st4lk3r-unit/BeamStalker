@@ -51,24 +51,29 @@ jobs:
         run: |
           case "${{ matrix.env }}" in
             esp32s3-tpager)
-              BIN="$(ls bin/BeamStalker-*-tpager.bin 2>/dev/null | head -1)"
+              PATTERN="bin/BeamStalker-*-tpager.bin"
               ;;
             native)
-              BIN="$(ls bin/BeamStalker-*-native.bin 2>/dev/null | head -1)"
+              PATTERN="bin/BeamStalker-*-native.bin"
               ;;
             native-headless)
-              BIN="$(ls bin/BeamStalker-*-native-headless.bin 2>/dev/null | head -1)"
+              PATTERN="bin/BeamStalker-*-headless.bin"
               ;;
           esac
 
-          if [ -z "$BIN" ]; then
-            BIN="$(ls bin/BeamStalker-* 2>/dev/null | head -1)"
+          shopt -s nullglob
+          files=( $PATTERN )
+
+          if [ ${#files[@]} -eq 0 ]; then
+            files=( bin/BeamStalker-* )
           fi
 
-          if [ -z "$BIN" ]; then
+          if [ ${#files[@]} -eq 0 ]; then
             echo "No artifact found in firmware/bin"
             exit 1
           fi
+
+          BIN="${files[0]}"
 
           echo "path=firmware/${BIN}" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$BIN")" >> "$GITHUB_OUTPUT"
