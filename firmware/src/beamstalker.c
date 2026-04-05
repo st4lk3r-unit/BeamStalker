@@ -55,6 +55,10 @@
 #if defined(BS_HAS_WIFI) && !defined(BS_NO_APP_WIFI)
 #  include "apps/app_wifi.h"
 #endif
+#include "bs/bs_ble.h"    /* defines BS_HAS_BLE when a backend is active */
+#if defined(BS_HAS_BLE) && !defined(BS_NO_APP_BLE)
+#  include "apps/app_ble.h"
+#endif
 
 #include "konsole/konsole.h"
 #include "konsole/static.h"   /* struct kon_line_state */
@@ -117,6 +121,9 @@ static void boot_idle_poll(void) {
 static const bs_app_t* const k_apps[] = {
 #if defined(BS_HAS_WIFI) && !defined(BS_NO_APP_WIFI)
     &app_wifi,
+#endif
+#if defined(BS_HAS_BLE) && !defined(BS_NO_APP_BLE)
+    &app_ble,
 #endif
 #ifndef BS_NO_APP_LOG
     &app_log,
@@ -393,26 +400,6 @@ void bs_init(void) {
 
     /* Debug overlay */
     bs_debug_init(s_arch);
-
-    /* WiFi — init before SIC+SD.  With PSRAM online (BOARD_HAS_PSRAM +
-     * qio_qspi SDK), the 213 KB framebuffer lives in PSRAM and
-     * CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP routes WiFi allocs to PSRAM too,
-     * so internal SRAM stays nearly untouched for SIC + SD.                */
-#ifdef BS_HAS_WIFI
-    {
-        int werr = bs_wifi_init(s_arch);
-        if (werr == 0) {
-            uint32_t wcaps = bs_wifi_caps();
-            BS_LOGOK("wifi", "caps=0x%02X  (inject=%s sniff=%s scan=%s)",
-                     (unsigned)wcaps,
-                     (wcaps & BS_WIFI_CAP_INJECT) ? "Y" : "N",
-                     (wcaps & BS_WIFI_CAP_SNIFF)  ? "Y" : "N",
-                     (wcaps & BS_WIFI_CAP_SCAN)   ? "Y" : "N");
-        } else {
-            BS_LOGBF("wifi", "init failed (%d)", werr);
-        }
-    }
-#endif
 
 #ifdef BS_USE_SIC
     /* SIC must init before fs: XL9555 GPIO14 (SD power enable) is set by preinit */

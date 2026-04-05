@@ -129,6 +129,11 @@ extern "C" int bs_ble_init(const bs_arch_t* arch) {
      * preserve the coexistence framework — see bs_ble_deinit() comment.     */
     esp_bt_controller_status_t ctrl = esp_bt_controller_get_status();
     if (ctrl == ESP_BT_CONTROLLER_STATUS_IDLE) {
+        /* Release Classic BT memory — BeamStalker uses BLE-only.
+         * This frees ~20-30 KB before the controller allocates its BLE pools,
+         * which is critical on no-PSRAM targets (Cardputer) where WiFi + BLE
+         * would otherwise exhaust the heap and trigger an internal IDF abort. */
+        esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
         esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
         if (esp_bt_controller_init(&bt_cfg) != ESP_OK) return -2;
     }

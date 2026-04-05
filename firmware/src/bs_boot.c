@@ -173,23 +173,8 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     }
     arch->delay_ms(60);
 
-    /* WiFi — already initialized before bs_boot_run(); just report status */
 #ifdef BS_HAS_WIFI
-    {
-        uint32_t caps = bs_wifi_caps();
-        if (caps & (BS_WIFI_CAP_INJECT | BS_WIFI_CAP_SNIFF)) {
-            char buf[56];
-            snprintf(buf, sizeof buf,
-                     "caps=0x%02X  inject=%s sniff=%s scan=%s",
-                     (unsigned)caps,
-                     (caps & BS_WIFI_CAP_INJECT) ? "Y" : "N",
-                     (caps & BS_WIFI_CAP_SNIFF)  ? "Y" : "N",
-                     (caps & BS_WIFI_CAP_SCAN)   ? "Y" : "N");
-            BS_LOGOK("wifi", buf);
-        } else {
-            BS_LOGBF("wifi", "init failed");
-        }
-    }
+    BS_LOGOK("wifi", "available (init on demand)");
     arch->delay_ms(60);
 #endif
 
