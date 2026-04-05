@@ -38,6 +38,15 @@ static sgfx_present_t s_pr;
 static int            s_w, s_h;
 static bool           s_ready = false;
 
+#if defined(VARIANT_CARDPUTER)
+static void bs_cardputer_panel_fixup(void) {
+    if (!s_dev.bus || !s_dev.bus->ops || !s_dev.bus->ops->write_cmd) return;
+    (void)s_dev.bus->ops->write_cmd(s_dev.bus, 0x21); /* INVON */
+}
+#else
+static void bs_cardputer_panel_fixup(void) {}
+#endif
+
 /* ---- internal FB helpers --------------------------------------------- */
 
 static inline uint16_t pack565(bs_color_t c) {
@@ -91,6 +100,8 @@ int bs_gfx_init(const bs_arch_t* arch) {
     (void)arch;
     int rc = sgfx_autoinit(&s_dev, s_scratch, sizeof s_scratch);
     if (rc) return rc;
+
+    bs_cardputer_panel_fixup();
 
     s_w = (int)s_dev.caps.width;
     s_h = (int)s_dev.caps.height;

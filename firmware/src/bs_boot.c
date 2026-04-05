@@ -32,20 +32,11 @@
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 #include "bs/bs_fs.h"
+#include "bs/bs_wifi.h"
+#include "bs/bs_ble.h"
 #include <stdio.h>
 #include <string.h>
-#include <stdbool.h>
 #include "bs/bs_assets.h"
-
-/* ---- Probe results set before bs_boot_run() by beamstalker.c ----------- */
-
-static bool s_wifi_ok = false;
-static bool s_ble_ok  = false;
-
-void bs_boot_set_probe(bool wifi_ok, bool ble_ok) {
-    s_wifi_ok = wifi_ok;
-    s_ble_ok  = ble_ok;
-}
 
 /* ---- Layout helpers --------------------------------------------------- */
 
@@ -112,6 +103,8 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     /* arch */
 #if defined(VARIANT_TPAGER)
     BS_LOGOK("arch", "ESP32-S3 arduino - T-Pager");
+#elif defined(VARIANT_CARDPUTER)
+    BS_LOGOK("arch", "ESP32-S3 arduino - Cardputer");
 #elif defined(VARIANT_NATIVE)
     BS_LOGOK("arch", "POSIX native linux");
 #else
@@ -151,10 +144,15 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
 
     /* keyboard */
 #ifdef BS_KEYS_SIC
+#  if defined(VARIANT_CARDPUTER)
+    BS_LOGOK("keyboard", "74HC138 56-key matrix");
+    arch->delay_ms(120);
+#  else
     BS_LOGOK("keyboard", "TCA8418 64-key matrix");
     arch->delay_ms(120);
     BS_LOGOK("encoder", "rotary input active");
     arch->delay_ms(60);
+#  endif
 #elif defined(BS_KEYS_NATIVE)
     BS_LOGOK("keyboard", "raw terminal input");
     arch->delay_ms(60);
@@ -176,22 +174,42 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     }
     arch->delay_ms(60);
 
-    /* radio probes — results stored by bs_boot_set_probe() before boot screen */
-#ifdef BS_HAS_BLE
-    if (s_ble_ok) {
-        BS_LOGOK("ble", "ready");
-    } else {
-        BS_LOGBF("ble", "init failed");
-    }
-    arch->delay_ms(40);
-#endif
+/* WiFi sanity probe: init → read caps → stop (driver stays resident) */
 #ifdef BS_HAS_WIFI
-    if (s_wifi_ok) {
-        BS_LOGOK("wifi", "ready");
-    } else {
-        BS_LOGBF("wifi", "init failed");
+    {
+        int werr = bs_wifi_init(arch);
+        if (werr == 0) {
+            uint32_t wcaps = bs_wifi_caps();
+            BS_LOGOK("wifi", "caps=0x%02X  inject=%s sniff=%s scan=%s",
+                     (unsigned)wcaps,
+                     (wcaps & BS_WIFI_CAP_INJECT) ? "Y" : "N",
+                     (wcaps & BS_WIFI_CAP_SNIFF)  ? "Y" : "N",
+                     (wcaps & BS_WIFI_CAP_SCAN)   ? "Y" : "N");
+            bs_wifi_deinit();
+        } else {
+            BS_LOGBF("wifi", "init failed (%d)", werr);
+        }
     }
-    arch->delay_ms(40);
+    arch->delay_ms(60);
+#endif
+
+/* BLE sanity probe: init → read caps → deinit (controller stays resident) */
+#ifdef BS_HAS_BLE
+    {
+        int berr = bs_ble_init(arch);
+        if (berr == 0) {
+            uint32_t bcaps = bs_ble_caps();
+            BS_LOGOK("ble", "caps=0x%02X  adv=%s scan=%s rand_addr=%s",
+                     (unsigned)bcaps,
+                     (bcaps & BS_BLE_CAP_ADVERTISE)  ? "Y" : "N",
+                     (bcaps & BS_BLE_CAP_SCAN)        ? "Y" : "N",
+                     (bcaps & BS_BLE_CAP_RAND_ADDR)   ? "Y" : "N");
+            bs_ble_deinit();
+        } else {
+            BS_LOGBF("ble", "init failed (%d)", berr);
+        }
+    }
+    arch->delay_ms(60);
 #endif
 
     /* final ready */

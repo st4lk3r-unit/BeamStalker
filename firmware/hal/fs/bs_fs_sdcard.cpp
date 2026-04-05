@@ -7,10 +7,27 @@
 #include "bs/bs_fs.h"
 #include "bs/bs_hw.h"
 #include <Arduino.h>
+#include <SPI.h>
 #include <SD.h>
 #include <FS.h>
 #include <string.h>
 #include <stdio.h>
+
+/*
+ * When the SD card uses different SPI pins from the display (e.g. Cardputer:
+ * display=SCK36/MOSI35, SD=SCK40/MOSI14) we must use a dedicated SPIClass
+ * instance so the two buses don't interfere.  On targets where display and SD
+ * share the same physical SPI bus (e.g. T-Pager SCK35/MOSI34 for both) the
+ * global SPI object is reused as before.
+ */
+#if defined(BS_SD_SCK_PIN) && defined(SGFX_PIN_SCK) && (BS_SD_SCK_PIN != SGFX_PIN_SCK)
+#  define BS_SD_USE_DEDICATED_SPI 1
+static SPIClass s_sd_spi(HSPI);
+static bool     s_sd_spi_begun = false;
+#  define SD_BUS s_sd_spi
+#else
+#  define SD_BUS SPI
+#endif
 
 #ifndef BS_SD_CS_PIN
 #  define BS_SD_CS_PIN 10
@@ -67,9 +84,18 @@ int bs_fs_init(void) {
         /* det == -1 means XL9555 not readable; proceed anyway and let SD.begin() fail */
     }
 
-    if (!SD.begin(BS_SD_CS_PIN, SPI, BS_SD_FREQ)) {
+#ifdef BS_SD_USE_DEDICATED_SPI
+    if (!s_sd_spi_begun) {
+        s_sd_spi.begin(BS_SD_SCK_PIN,
+                       (int)BS_SD_MISO_PIN,
+                       BS_SD_MOSI_PIN,
+                       BS_SD_CS_PIN);
+        s_sd_spi_begun = true;
+    }
+#endif
+    if (!SD.begin(BS_SD_CS_PIN, SD_BUS, BS_SD_FREQ)) {
         /* Fallback: try at a lower, more compatible speed */
-        if (!SD.begin(BS_SD_CS_PIN, SPI, 4000000)) {
+        if (!SD.begin(BS_SD_CS_PIN, SD_BUS, 4000000)) {
             s_init_error = "SD.begin() failed (tried 20 MHz + 4 MHz)";
             return -1;
         }
@@ -97,7 +123,7 @@ int bs_fs_format(void) {
      * Use 4 MHz for the format pass (more compatible with unconfigured cards).
      * mountpoint="/sd", max_files=5 are the Arduino SD library defaults.
      */
-    if (!SD.begin(BS_SD_CS_PIN, SPI, 4000000, "/sd", 5, /*format_if_empty=*/true)) {
+    if (!SD.begin(BS_SD_CS_PIN, SD_BUS, 4000000, "/sd", 5, /*format_if_empty=*/true)) {
         s_init_error = "format+mount failed";
         return -1;
     }
