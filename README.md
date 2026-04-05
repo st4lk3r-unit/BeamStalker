@@ -1,3 +1,3 @@
-![](assets/beamstalker.png)
+![](assets/beamstalker-bg.png)
 
 Settling...keep watching
