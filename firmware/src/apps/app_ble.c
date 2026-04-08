@@ -77,8 +77,8 @@ static const ble_entry_t k_entries[] = {
 /* ── Draw ────────────────────────────────────────────────────────────────── */
 
 static void draw_menu(int cursor, bool caps_ok) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 0.5f : 1.0f;
     int sw  = bs_gfx_width();
     int cy  = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts) + bs_gfx_text_h(ts2) + 10;

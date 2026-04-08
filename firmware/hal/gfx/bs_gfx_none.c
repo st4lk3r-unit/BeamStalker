@@ -38,18 +38,23 @@ void bs_gfx_bitmap_1bpp(int x, int y, int w, int h,
                          int scale, int step) {
     (void)x;(void)y;(void)w;(void)h;(void)data;(void)fg;(void)scale;(void)step;
 }
-void bs_gfx_text(int x, int y, const char* s, bs_color_t c, int scale) {
+void bs_gfx_text(int x, int y, const char* s, bs_color_t c, float scale) {
     (void)x;(void)y;(void)s;(void)c;(void)scale;
 }
 /* Return approximate metrics so apps can compute layout without rendering */
-int  bs_gfx_text_w(const char* s, int scale) {
+int  bs_gfx_text_w(const char* s, float scale) {
     if (!s) return 0;
     int len = 0; while (s[len]) len++;
-    return len * 6 * scale;   /* 5px glyph + 1px gap */
+    return (int)((float)len * 6.0f * scale);
 }
-int  bs_gfx_text_h(int scale) { return 8 * scale; }
+int  bs_gfx_text_h(float scale) { return (int)(7.0f * (scale < 1.0f ? 1.0f : scale)); }
 
-void bs_gfx_present(void) {}
+void bs_gfx_clip(int x, int y, int w, int h) { (void)x;(void)y;(void)w;(void)h; }
+
+/* Weak reference — bs_ui.c provides the strong version for carousel animation */
+__attribute__((weak)) void bs_ui_tick(void) {}
+
+void bs_gfx_present(void) { bs_ui_tick(); }
 void bs_gfx_set_brightness(int pct) { (void)pct; }
 
 #endif /* !BS_GFX_NATIVE && !BS_USE_SGFX */

@@ -13,9 +13,21 @@ void bs_ui_draw_hint(const char* hint);      /* hint line at bottom (auto-scales
 int  bs_ui_content_y(void);                  /* y where content starts */
 int  bs_ui_content_h(void);                  /* height of content area */
 
-/* Text scale (1=small, 2=medium, 3=large) */
-int  bs_ui_text_scale(void);
-void bs_ui_set_text_scale(int s);
+/* Draw text clipped to a fixed-width box.
+ * If text fits in w pixels: drawn left-aligned.
+ * If text overflows: animated marquee carousel (requires bs_ui_tick() to advance). */
+void bs_ui_draw_text_box(int x, int y, int w, const char* text, bs_color_t col, float scale);
+
+/* Draw up/down scroll caret indicators at the right edge of the content area.
+ * Call after drawing list rows.  No-op when all items fit (total <= visible). */
+void bs_ui_draw_scroll_arrows(int scroll, int total, int visible);
+
+/* Advance the carousel animation counter — called automatically from bs_gfx_present(). */
+void bs_ui_tick(void);
+
+/* Text scale (1.0=small, 1.5=mid-small, 2.0=medium, 2.5=mid-large, 3.0=large) */
+float bs_ui_text_scale(void);
+void  bs_ui_set_text_scale(float s);
 
 /* Brightness (0-100 %) */
 int  bs_ui_brightness(void);

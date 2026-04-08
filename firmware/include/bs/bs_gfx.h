@@ -71,13 +71,19 @@ void bs_gfx_bitmap_1bpp(int x, int y, int w, int h,
 
 /*
  * Text - uses 5×7 bitmap font.
- * scale = 1 → smallest readable; scale = 4 → large banner.
- * On native terminal: block-character rendering using '█' / ' '.
+ * scale = 1.0 → smallest readable; scale = 3.0 → large banner.
+ * Fractional scales (e.g. 1.5, 2.5) are supported and give intermediate sizes
+ * via nearest-neighbour pixel stretching.
  * On SGFX: direct pixel fill using sgfx_font5x7_get().
  */
-void bs_gfx_text(int x, int y, const char* s, bs_color_t c, int scale);
-int  bs_gfx_text_w(const char* s, int scale);  /* advance width in screen units */
-int  bs_gfx_text_h(int scale);                 /* line height in screen units   */
+void bs_gfx_text(int x, int y, const char* s, bs_color_t c, float scale);
+int  bs_gfx_text_w(const char* s, float scale);  /* advance width in screen units */
+int  bs_gfx_text_h(float scale);                 /* line height in screen units   */
+
+/* Set a clipping rectangle for all subsequent draw calls.
+ * Pass w=0 or h=0 to disable clipping (full screen).
+ * Used by bs_ui_draw_text_box() for carousel overflow. */
+void bs_gfx_clip(int x, int y, int w, int h);
 
 /* ---------- Present (flush to hardware / terminal) --------------------- */
 void bs_gfx_present(void);

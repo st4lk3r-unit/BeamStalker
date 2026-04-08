@@ -220,7 +220,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     /* Press any key on the UI display - terminal konsole kept alive via idle_fn */
     {
         static const char* prompt = "[ press any key ]";
-        int ts   = bs_ui_text_scale();
+        float ts = bs_ui_text_scale();
         int sw   = bs_gfx_width();
         int sh   = bs_gfx_height();
         int pw   = bs_gfx_text_w(prompt, ts);

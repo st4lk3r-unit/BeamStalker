@@ -51,7 +51,7 @@ static const uint8_t k_log_icon_16[] = {
  * chars_per_row - how many characters fit in text_w pixels at scale ts.
  * Uses a single-char probe; all built-in fonts are monospace.
  */
-static int chars_per_row(int text_w, int ts) {
+static int chars_per_row(int text_w, float ts) {
     int cw = bs_gfx_text_w("W", ts);
     if (cw <= 0) cw = 6;
     int cpr = text_w / cw;
@@ -70,7 +70,7 @@ static int entry_rows(const char* text, int cpr) {
 /* ---- Draw -------------------------------------------------------------- */
 
 static void draw_log_view(int scroll) {
-    int ts      = bs_ui_text_scale();
+    float ts    = bs_ui_text_scale();
     int sw      = bs_gfx_width();
     int sh      = bs_gfx_height();
     int hh      = bs_ui_header_h();
@@ -136,7 +136,7 @@ static void draw_log_view(int scroll) {
 /* ---- App --------------------------------------------------------------- */
 
 static void app_log_run(const bs_arch_t* arch) {
-    int ts      = bs_ui_text_scale();
+    float ts    = bs_ui_text_scale();
     int sh      = bs_gfx_height();
     int hh      = bs_ui_header_h();
     int line_h  = bs_gfx_text_h(ts) + 2;

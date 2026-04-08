@@ -150,7 +150,7 @@ static int s_bat_frames = 0;
 
 static void draw_header(void) {
     int sw  = bs_gfx_width();
-    int ts  = bs_ui_text_scale();
+    float ts = bs_ui_text_scale();
     int hh  = bs_ui_header_h();
     int ty  = (hh - bs_gfx_text_h(ts)) / 2;
     int ih  = bs_gfx_text_h(ts);
@@ -203,9 +203,9 @@ static void draw_header(void) {
     }
 
     /* --- Left side title - downscale if it would overlap status icons --- */
-    int title_ts = ts;
-    while (title_ts > 1 && 8 + bs_gfx_text_w("BeamStalker", title_ts) > rx - 8)
-        title_ts--;
+    float title_ts = ts;
+    while (title_ts > 1.0f && 8 + bs_gfx_text_w("BeamStalker", title_ts) > rx - 8)
+        title_ts -= 0.5f;
     bs_gfx_text(8, (hh - bs_gfx_text_h(title_ts)) / 2, "BeamStalker",
                 g_bs_theme.dim, title_ts);
 
@@ -218,7 +218,7 @@ static void draw_grid(void) {
     int sw  = bs_gfx_width();
     int sh  = bs_gfx_height();
     int hh  = bs_ui_header_h();
-    int ns  = bs_ui_text_scale(); if (ns > 2) ns = 2;
+    float ns = bs_ui_text_scale(); if (ns > 2.0f) ns = 2.0f;
     int nh  = bs_gfx_text_h(ns);
 
     int cols       = grid_cols();
@@ -329,7 +329,7 @@ static void draw_slideshow(void) {
     int sw  = bs_gfx_width();
     int sh  = bs_gfx_height();
     int hh  = bs_ui_header_h();
-    int ts  = bs_ui_text_scale();
+    float ts = bs_ui_text_scale();
     int name_spare  = bs_gfx_text_h(ts) + 8;
     int page_ind_h  = bs_gfx_text_h(ts) + 6;  /* "N / Total" indicator at bottom */
 
@@ -395,7 +395,7 @@ static void draw_list(void) {
     int sw = bs_gfx_width();
     int sh = bs_gfx_height();
 
-    int ts        = bs_ui_text_scale();
+    float ts      = bs_ui_text_scale();
     int row_h     = bs_gfx_text_h(ts) + 4;
     int start_y   = bs_ui_header_h();
     int visible   = (sh - start_y) / row_h;

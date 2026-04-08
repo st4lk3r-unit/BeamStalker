@@ -50,7 +50,7 @@ static void draw_graph(int gx, int gy, int gw, int gh,
                         const uint16_t* ring,
                         const char* title, const char* unit,
                         bs_color_t line_col) {
-    int ts      = bs_ui_text_scale();
+    float ts    = bs_ui_text_scale();
     int title_h = bs_gfx_text_h(ts) + 3;
 
     bs_gfx_fill_rect(gx, gy, gw, gh, g_bs_theme.bg);
@@ -259,7 +259,7 @@ static void build_sysinfo(void) {
  * based on s_marquee_tick (advances ~3 chars/sec at 30 Hz).
  */
 static void render_marquee(int x, int y, const char* text,
-                            int avail_w, int ts, bs_color_t col) {
+                            int avail_w, float ts, bs_color_t col) {
     int tw = bs_gfx_text_w(text, ts);
     if (tw <= avail_w) {
         bs_gfx_text(x, y, text, col, ts);
@@ -286,7 +286,7 @@ static void render_marquee(int x, int y, const char* text,
 /* ---- Sysinfo page ------------------------------------------------------- */
 
 static void draw_sysinfo(int sw, int sh, uint32_t now_ms) {
-    int ts     = bs_ui_text_scale(); if (ts > 2) ts = 2;
+    float ts   = bs_ui_text_scale(); if (ts > 2.0f) ts = 2.0f;
     int lh     = bs_gfx_text_h(ts) + 3;
     int hint_h = bs_gfx_text_h(ts) + 4;
 
