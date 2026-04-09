@@ -106,7 +106,7 @@ After building, you can flash directly with PlatformIO:
 pio run -e esp32s3-tpager -t upload
 ```
 
-You can also use release binaries with external flashers, depending on the board and boot flow:
+You can also use [release binaries](https://github.com/st4lk3r-unit/BeamStalker/releases/latest) with external flashers, depending on the board and boot flow:
 
 * `esptool.py`
 * browser flashers such as [`esptool-js`](https://espressif.github.io/esptool-js/)
