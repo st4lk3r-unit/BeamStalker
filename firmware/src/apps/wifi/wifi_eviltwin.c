@@ -515,7 +515,7 @@ void wifi_eviltwin_run(const bs_arch_t* arch) {
             s_dirty = true;
         }
 
-#if defined(VARIANT_TPAGER) || defined(VARIANT_TDONGLE_S3)
+#if defined(VARIANT_TPAGER) || defined(VARIANT_TDONGLE_S3) || defined(VARIANT_HELTEC_V3)
         arch->delay_ms(s_phase == ET_RUNNING ? 2 : 1);
 #else
         arch->delay_ms(s_phase == ET_RUNNING ? 5 : 10);

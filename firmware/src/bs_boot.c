@@ -134,6 +134,8 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     BS_LOGOK("arch", "ESP32-S3 arduino - T-Dongle-S3");
 #elif defined(VARIANT_CARDPUTER)
     BS_LOGOK("arch", "ESP32-S3 arduino - Cardputer");
+#elif defined(VARIANT_HELTEC_V3)
+    BS_LOGOK("arch", "ESP32-S3 arduino - Heltec V3");
 #elif defined(VARIANT_NATIVE)
     BS_LOGOK("arch", "POSIX native linux");
 #else
@@ -183,7 +185,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     arch->delay_ms(60);
 #  endif
 #elif defined(BS_KEYS_GPIO)
-    BS_LOGOK("keyboard", "BOOT key: short=next  double=back  long=enter");
+    BS_LOGOK("keyboard", "single key: short=next  double=back  long=enter");
     arch->delay_ms(100);
 #elif defined(BS_KEYS_NATIVE)
     BS_LOGOK("keyboard", "raw terminal input");

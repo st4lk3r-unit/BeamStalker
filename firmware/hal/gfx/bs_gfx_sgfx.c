@@ -14,6 +14,7 @@
 #ifdef BS_USE_SGFX
 
 #include "bs/bs_gfx.h"
+#include "board.h"
 #include "sgfx.h"
 #include "sgfx_port.h"
 #include "sgfx_fb.h"
@@ -21,6 +22,10 @@
 
 #include <string.h>
 #include <stdlib.h>
+
+#if defined(ARCH_ESP32)
+#  include "driver/gpio.h"
+#endif
 
 /* ---- scratch buffer for SGFX HAL (bus DMA staging) ------------------- */
 #ifndef BS_SGFX_SCRATCH_BYTES
@@ -40,6 +45,26 @@ static bool           s_ready = false;
 
 /* Clip rectangle — (0,0,0,0) = disabled */
 static int s_clip_x, s_clip_y, s_clip_w, s_clip_h;
+
+#if defined(ARCH_ESP32) && defined(BS_DISPLAY_POWER_PIN)
+static void bs_variant_display_power(bool on) {
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << BS_DISPLAY_POWER_PIN,
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    (void)gpio_config(&io);
+#if defined(BS_DISPLAY_POWER_ACTIVE_LOW) && BS_DISPLAY_POWER_ACTIVE_LOW
+    (void)gpio_set_level((gpio_num_t)BS_DISPLAY_POWER_PIN, on ? 0 : 1);
+#else
+    (void)gpio_set_level((gpio_num_t)BS_DISPLAY_POWER_PIN, on ? 1 : 0);
+#endif
+}
+#else
+static void bs_variant_display_power(bool on) { (void)on; }
+#endif
 
 #if defined(VARIANT_CARDPUTER)
 static void bs_cardputer_panel_fixup(void) {
@@ -63,6 +88,20 @@ static void bs_tdongle_s3_panel_fixup(void) {
 }
 #else
 static void bs_tdongle_s3_panel_fixup(void) {}
+#endif
+
+#if defined(VARIANT_HELTEC_V3)
+static void bs_heltec_v3_panel_prepare(void) {
+    /* OLED power is gated by Vext on Heltec V3. Enable it before the I²C bus
+     * and SSD1306 init sequence begin, otherwise the panel stays dark. */
+    bs_variant_display_power(true);
+}
+static void bs_heltec_v3_panel_fixup(void) {
+    bs_variant_display_power(true);
+}
+#else
+static void bs_heltec_v3_panel_prepare(void) {}
+static void bs_heltec_v3_panel_fixup(void) {}
 #endif
 
 /* ---- internal FB helpers --------------------------------------------- */
@@ -135,11 +174,13 @@ static void fb_text5x7(int x0, int y0, const char* s, bs_color_t c, float scale)
 
 int bs_gfx_init(const bs_arch_t* arch) {
     (void)arch;
+    bs_heltec_v3_panel_prepare();
     int rc = sgfx_autoinit(&s_dev, s_scratch, sizeof s_scratch);
     if (rc) return rc;
 
     bs_cardputer_panel_fixup();
     bs_tdongle_s3_panel_fixup();
+    bs_heltec_v3_panel_fixup();
 
     s_w = (int)s_dev.caps.width;
     s_h = (int)s_dev.caps.height;
