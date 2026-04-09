@@ -23,11 +23,9 @@
 
 static void draw_scan(int scroll, int cursor) {
     float ts  = bs_ui_text_scale();
-    float ts2 = ts > 1.0f ? ts - 0.5f : 1.0f;
-    int sw  = bs_gfx_width();
-    int cy  = bs_ui_content_y();
-    int lh  = bs_gfx_text_h(ts) + bs_gfx_text_h(ts2) + 6;
-    int cnt = ble_scan_svc_count();
+    int   cy  = bs_ui_content_y();
+    int   lh  = bs_ui_menu_row_h(ts);
+    int   cnt = ble_scan_svc_count();
 
     bs_gfx_clear(g_bs_theme.bg);
 
@@ -42,31 +40,26 @@ static void draw_scan(int scroll, int cursor) {
         return;
     }
 
-    int hint_h  = bs_gfx_text_h(ts2) + 6;
-    int visible = (bs_gfx_height() - cy - hint_h) / lh;
-    if (visible < 1) visible = 1;
+    int visible = bs_ui_menu_visible(ts);
 
     for (int i = 0; i < visible && (scroll + i) < cnt; i++) {
         int idx = scroll + i;
         const ble_scan_dev_t* d = ble_scan_svc_dev(idx);
         if (!d) continue;
-        bool sel = (idx == cursor);
-        int  y   = cy + i * lh;
-        if (sel) bs_gfx_fill_rect(0, y - 2, sw, lh - 1, g_bs_theme.dim);
 
         char mac[18];
         snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X",
                  d->addr[0], d->addr[1], d->addr[2],
                  d->addr[3], d->addr[4], d->addr[5]);
-        bs_gfx_text(8, y, mac, sel ? g_bs_theme.accent : g_bs_theme.primary, ts);
 
         char detail[32];
         snprintf(detail, sizeof detail, "%s  %d dBm",
                  ble_vendor_str(d->vendor), (int)d->rssi);
-        bs_gfx_text(8, y + bs_gfx_text_h(ts) + 2, detail,
-                    sel ? g_bs_theme.primary : g_bs_theme.dim, ts2);
+
+        bs_ui_draw_menu_row(cy + i * lh, mac, detail, idx == cursor, ts);
     }
 
+    bs_ui_draw_scroll_arrows(scroll, cnt, visible);
     bs_ui_draw_hint("UP/DN=scroll  BACK=exit");
     bs_gfx_present();
 }
@@ -74,15 +67,8 @@ static void draw_scan(int scroll, int cursor) {
 /* ── Scroll helper ───────────────────────────────────────────────────────── */
 
 static void update_scroll(int cursor, int* scroll) {
-    float ts    = bs_ui_text_scale();
-    float ts2   = ts > 1.0f ? ts - 0.5f : 1.0f;
-    int lh      = bs_gfx_text_h(ts) + bs_gfx_text_h(ts2) + 6;
-    int hint_h  = bs_gfx_text_h(ts2) + 6;
-    int visible = (bs_gfx_height() - bs_ui_content_y() - hint_h) / lh;
-    if (visible < 1) visible = 1;
-    if (cursor < *scroll)            *scroll = cursor;
-    if (cursor >= *scroll + visible) *scroll = cursor - visible + 1;
-    if (*scroll < 0)                 *scroll = 0;
+    int visible = bs_ui_menu_visible(bs_ui_text_scale());
+    bs_ui_list_clamp_scroll(cursor, scroll, ble_scan_svc_count(), visible);
 }
 
 /* ── Public entry point ──────────────────────────────────────────────────── */
@@ -91,17 +77,21 @@ void ble_scan_run(const bs_arch_t* arch) {
     ble_scan_svc_init(arch);
     ble_scan_svc_start();
 
-    int  cursor = 0, scroll = 0;
-    bool dirty  = true;
+    int cursor = 0, scroll = 0;
 
+    uint32_t prev_ms = arch->millis();
     for (;;) {
+        uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
+
         bs_nav_id_t nav;
         while ((nav = bs_nav_poll()) != BS_NAV_NONE) {
             switch (nav) {
                 case BS_NAV_UP: case BS_NAV_PREV:
-                    if (cursor > 0) { cursor--; dirty = true; } break;
+                    if (cursor > 0) cursor--; break;
                 case BS_NAV_DOWN: case BS_NAV_NEXT:
-                    if (cursor < ble_scan_svc_count() - 1) { cursor++; dirty = true; } break;
+                    if (cursor < ble_scan_svc_count() - 1) cursor++; break;
                 case BS_NAV_BACK:
                     ble_scan_svc_stop();
                     return;
@@ -109,21 +99,15 @@ void ble_scan_run(const bs_arch_t* arch) {
             }
         }
 
-        if (ble_scan_svc_dirty()) {
-            ble_scan_svc_clear_dirty();
-            dirty = true;
-        }
+        ble_scan_svc_clear_dirty();
 
-        if (dirty) {
-            dirty = false;
-            int cnt = ble_scan_svc_count();
-            if (cursor >= cnt && cnt > 0) cursor = cnt - 1;
-            if (cursor < 0) cursor = 0;
-            update_scroll(cursor, &scroll);
-            draw_scan(scroll, cursor);
-        }
+        int cnt = ble_scan_svc_count();
+        if (cursor >= cnt && cnt > 0) cursor = cnt - 1;
+        if (cursor < 0) cursor = 0;
+        update_scroll(cursor, &scroll);
+        draw_scan(scroll, cursor);   /* always redraw — carousel needs it */
 
-        arch->delay_ms(10);
+        arch->delay_ms(16);
     }
 }
 

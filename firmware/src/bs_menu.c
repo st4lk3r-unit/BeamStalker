@@ -302,11 +302,9 @@ static void draw_grid(void) {
             bs_gfx_border(px, py, ps, ps, border_col, BS_BORDER_SHARP);
         }
 
-        /* Name centered at the bottom of the card */
+        /* Name at the bottom of the card — carousel if it overflows */
         int name_y = card_y + card_h - nh - 4;
-        int nw     = bs_gfx_text_w(app->name, ns);
-        int name_x = card_x + (card_w - nw) / 2;
-        bs_gfx_text(name_x, name_y, app->name, name_col, ns);
+        bs_ui_draw_text_box(card_x + 2, name_y, card_w - 4, app->name, name_col, ns, selected);
     }
 
     /* Row scroll indicator: tiny dots bottom-right when rows overflow */
@@ -357,10 +355,9 @@ static void draw_slideshow(void) {
                            app->icon, g_bs_theme.primary, scale, step);
 
         /* Name below icon */
-        int name_w = bs_gfx_text_w(app->name, ts);
-        int name_x = (sw - name_w) / 2;
         int name_y = oy + rendered_h * scale + 6;
-        bs_gfx_text(name_x, name_y, app->name, g_bs_theme.primary, ts);
+        int nbox_w = sw - 16;
+        bs_ui_draw_text_box(8, name_y, nbox_w, app->name, g_bs_theme.primary, ts, true);
     } else {
         /* Placeholder box */
         int box = target;
@@ -369,10 +366,9 @@ static void draw_slideshow(void) {
         if (oy < hh) oy = hh;
         bs_gfx_border(ox, oy, box, box, g_bs_theme.dim, g_bs_theme.border);
 
-        int name_w = bs_gfx_text_w(app->name, ts);
-        int name_x = (sw - name_w) / 2;
         int name_y = oy + box + 6;
-        bs_gfx_text(name_x, name_y, app->name, g_bs_theme.primary, ts);
+        int nbox_w = sw - 16;
+        bs_ui_draw_text_box(8, name_y, nbox_w, app->name, g_bs_theme.primary, ts, true);
     }
 
     /* Left / right arrows */
@@ -382,11 +378,11 @@ static void draw_slideshow(void) {
     bs_gfx_text(4, mid_y, "<", left_col, ts);
     bs_gfx_text(sw - bs_gfx_text_w(">", ts) - 4, mid_y, ">", right_col, ts);
 
-    /* Page indicator */
+    /* Page indicator — bottom-right corner */
     char page_buf[16];
-    snprintf(page_buf, sizeof page_buf, "%d / %d", (int)s_cursor + 1, (int)s_count);
+    snprintf(page_buf, sizeof page_buf, "%d/%d", (int)s_cursor + 1, (int)s_count);
     int pw = bs_gfx_text_w(page_buf, ts);
-    bs_gfx_text((sw - pw) / 2, sh - bs_gfx_text_h(ts) - 3, page_buf, g_bs_theme.dim, ts);
+    bs_gfx_text(sw - pw - 4, sh - bs_gfx_text_h(ts) - 3, page_buf, g_bs_theme.dim, ts);
 }
 
 /* ---- LIST ------------------------------------------------------------- */
@@ -419,7 +415,7 @@ static void draw_list(void) {
         }
 
         bs_color_t tc = selected ? g_bs_theme.primary : g_bs_theme.secondary;
-        bs_gfx_text(6, row_y + 2, app->name, tc, ts);
+        bs_ui_draw_text_box(6, row_y + 2, sw - 12, app->name, tc, ts, selected);
     }
 }
 
@@ -450,16 +446,18 @@ void bs_menu_init(const bs_app_t* const* apps, size_t count,
 const bs_app_t* bs_menu_run(const bs_arch_t* arch) {
     s_dirty = true;
     s_grid_scroll = 0;
+    uint32_t prev_ms = arch->millis();
     while (true) {
-        if (s_dirty) {
-            bs_gfx_clear(g_bs_theme.bg);
-            draw_menu_by_mode();
-            bs_debug_frame();
-            bs_gfx_present();
-            s_dirty = false;
-        }
+        uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
 
-        arch->delay_ms(5);    /* ~200 Hz poll - also throttles encoder */
+        bs_gfx_clear(g_bs_theme.bg);
+        draw_menu_by_mode();
+        bs_debug_frame();
+        bs_gfx_present();
+
+        arch->delay_ms(16);
         bs_nav_id_t nav = bs_nav_poll();
         if (s_idle) s_idle();
 

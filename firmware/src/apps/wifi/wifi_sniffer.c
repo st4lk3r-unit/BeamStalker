@@ -138,7 +138,6 @@ static snf_filter_t      s_filter;
 static snf_chmode_t      s_chmode;
 static uint8_t           s_channel;
 static int               s_menu_cursor;
-static bool              s_dirty;
 static int               s_pkt_cursor;
 static bool              s_pkt_expanded;
 static mac_filter_mode_t s_mac_filter_mode;
@@ -148,9 +147,6 @@ static uint32_t          s_total_bytes;
 static bs_pcap_t*        s_pcap;
 static char              s_pcap_path[32];
 
-#define CAROUSEL_INTERVAL_MS 220
-static uint32_t s_carousel_ms;
-static int      s_carousel_offset;
 
 /* ── Frame filter predicate ──────────────────────────────────────────────── */
 
@@ -203,7 +199,6 @@ static void pkt_cb(const uint8_t* data, uint16_t len,
         uint32_t ts_usec = (ts_ms % 1000) * 1000;
         bs_pcap_write(s_pcap, data, len, ts_sec, ts_usec);
     }
-    s_dirty = true;
 }
 
 /* ── PCAP ────────────────────────────────────────────────────────────────── */
@@ -222,8 +217,6 @@ static void pcap_open_next(void) {
 
 static void start_sniff(const bs_arch_t* arch) {
     s_pkt_expanded    = false;
-    s_carousel_offset = 0;
-    s_carousel_ms     = 0;
     wifi_pps_init(&s_pps);
     s_total_bytes = 0;
     disp_reset();
@@ -231,7 +224,6 @@ static void start_sniff(const bs_arch_t* arch) {
     sniffer_svc_init(arch);
     sniffer_svc_start(s_chmode == SNF_CH_FIXED ? s_channel : 0, 500, pkt_cb, NULL);
     s_ui_state = SNF_RUNNING;
-    s_dirty    = true;
 }
 
 static void stop_sniff(void) {
@@ -260,7 +252,8 @@ static int cursor_to_item(int cursor) {
 
 static void draw_menu(void) {
     float ts = bs_ui_text_scale();
-    int sw = bs_gfx_width(), cy = bs_ui_content_y(), lh = bs_gfx_text_h(ts) + 4;
+    int   cy = bs_ui_content_y();
+    int   lh = bs_ui_row_h(ts);
     const char* chmodes[] = { "AUTO-HOP", "FIXED" };
     char filter_buf[32], chmode_buf[28], ch_buf[24];
     snprintf(filter_buf, sizeof filter_buf, "Filter:  %-10s", k_filter_names[s_filter]);
@@ -271,26 +264,31 @@ static void draw_menu(void) {
         (s_chmode == SNF_CH_FIXED) ? ch_buf : NULL, "Back"
     };
 
+    /* Build dense array of active items for scroll math */
+    int n = 0;
+    for (int i = 0; i < 5; i++) if (items[i]) n++;
+
     bs_gfx_clear(g_bs_theme.bg);
     bs_ui_draw_header("Sniffer");
 
-    int hint_h  = bs_gfx_text_h(ts) + 6;
-    int max_rows = (bs_gfx_height() - cy - hint_h) / lh;
-    if (max_rows < 1) max_rows = 1;
-    int scroll = 0;
-    if (s_menu_cursor >= max_rows) scroll = s_menu_cursor - max_rows + 1;
+    int visible = bs_ui_list_visible(ts);
+    int scroll  = 0;
+    bs_ui_list_clamp_scroll(s_menu_cursor, &scroll, n, visible);
 
+    int sw = bs_gfx_width();
     int row = 0, drawn = 0;
     for (int i = 0; i < 5; i++) {
         if (!items[i]) continue;
         if (row < scroll) { row++; continue; }
-        if (drawn >= max_rows) break;
+        if (drawn >= visible) break;
         bool sel = (row == s_menu_cursor);
         int  y   = cy + drawn * lh;
         if (sel) bs_gfx_fill_rect(0, y - 1, sw, lh - 1, g_bs_theme.dim);
-        bs_gfx_text(8, y, items[i], sel ? g_bs_theme.accent : g_bs_theme.primary, ts);
+        bs_ui_draw_text_box(8, y, sw - 16, items[i],
+                            sel ? g_bs_theme.accent : g_bs_theme.primary, ts, sel);
         row++; drawn++;
     }
+    bs_ui_draw_scroll_arrows(scroll, n, visible);
     bs_ui_draw_hint("<<>>:filter  SELECT=pick  BACK=exit");
     bs_gfx_present();
 }
@@ -300,6 +298,7 @@ static void draw_menu(void) {
 static void draw_running(void) {
     float ts  = bs_ui_text_scale();
     float ts2 = ts > 1.0f ? ts - 0.5f : 1.0f;
+    int sw  = bs_gfx_width();
     int cy  = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts)  + 4;
     int lh2 = bs_gfx_text_h(ts2) + 3;
@@ -320,12 +319,12 @@ static void draw_running(void) {
         snprintf(buf, sizeof buf, "Ch:%d%s  Filter:%s",
                  ch, hop ? "(hop)" : "", k_filter_names[s_filter]);
     }
-    bs_gfx_text(8, cy, buf, g_bs_theme.secondary, ts2);
+    bs_ui_draw_text_box(8, cy, sw - 16, buf, g_bs_theme.secondary, ts2, true);
 
     snprintf(buf, sizeof buf, "Frames:%lu (%luB)  PPS:%lu  Drop:%lu",
              (unsigned long)sniffer_svc_count(), (unsigned long)s_total_bytes,
              (unsigned long)s_pps.pps,           (unsigned long)sniffer_svc_dropped());
-    bs_gfx_text(8, cy + lh2, buf, g_bs_theme.primary, ts2);
+    bs_ui_draw_text_box(8, cy + lh2, sw - 16, buf, g_bs_theme.primary, ts2, true);
 
     int sep_y = cy + 2 * lh2 + 3;
     bs_gfx_fill_rect(0, sep_y, bs_gfx_width(), 1, g_bs_theme.dim);
@@ -334,27 +333,27 @@ static void draw_running(void) {
     if (s_pkt_expanded) {
         const disp_frame_t* d = &s_pkt_pinned;
         int y = list_y;
-        bs_gfx_text(8, y, d->label, g_bs_theme.accent, ts); y += lh;
+        bs_ui_draw_text_box(8, y, sw - 16, d->label, g_bs_theme.accent, ts, true); y += lh;
         snprintf(buf, sizeof buf, "RSSI:%d  Len:%d", (int)d->rssi, (int)d->len);
-        bs_gfx_text(8, y, buf, g_bs_theme.primary, ts2); y += lh2;
+        bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true); y += lh2;
         if (d->has_addr) {
             bool sel2 = (s_mac_filter_mode == MAC_FILTER_ADDR2);
             bool sel1 = (s_mac_filter_mode == MAC_FILTER_ADDR1);
             snprintf(buf, sizeof buf, "Src  %02x:%02x:%02x:%02x:%02x:%02x%s",
                      d->addr2[0],d->addr2[1],d->addr2[2],
                      d->addr2[3],d->addr2[4],d->addr2[5], sel2?" *":"");
-            bs_gfx_text(8, y, buf, sel2?g_bs_theme.warn:g_bs_theme.primary, ts2); y += lh2;
+            bs_ui_draw_text_box(8, y, sw - 16, buf, sel2?g_bs_theme.warn:g_bs_theme.primary, ts2, true); y += lh2;
             snprintf(buf, sizeof buf, "Dst  %02x:%02x:%02x:%02x:%02x:%02x%s",
                      d->addr1[0],d->addr1[1],d->addr1[2],
                      d->addr1[3],d->addr1[4],d->addr1[5], sel1?" *":"");
-            bs_gfx_text(8, y, buf, sel1?g_bs_theme.warn:g_bs_theme.primary, ts2); y += lh2;
+            bs_ui_draw_text_box(8, y, sw - 16, buf, sel1?g_bs_theme.warn:g_bs_theme.primary, ts2, true); y += lh2;
         }
         if (d->has_addr3) {
             bool sel3 = (s_mac_filter_mode == MAC_FILTER_ADDR3);
             snprintf(buf, sizeof buf, "BSSID%02x:%02x:%02x:%02x:%02x:%02x%s",
                      d->addr3[0],d->addr3[1],d->addr3[2],
                      d->addr3[3],d->addr3[4],d->addr3[5], sel3?" *":"");
-            bs_gfx_text(8, y, buf, sel3?g_bs_theme.warn:g_bs_theme.primary, ts2);
+            bs_ui_draw_text_box(8, y, sw - 16, buf, sel3?g_bs_theme.warn:g_bs_theme.primary, ts2, true);
         }
         bs_ui_draw_hint("<<>>:pin addr  SEL/BACK=close");
         bs_gfx_present();
@@ -401,21 +400,7 @@ static void draw_running(void) {
                 snprintf(buf, sizeof buf, "%-8s %d %dB",
                          d->label,(int)d->rssi,(int)d->len);
 
-            int avail  = bs_gfx_width() - 16;
-            int full_w = bs_gfx_text_w(buf, ts2);
-            if (full_w <= avail) {
-                bs_gfx_text(8, y, buf, g_bs_theme.accent, ts2);
-            } else {
-                int flen  = (int)strlen(buf);
-                int max_c = (int)((long)flen * avail / full_w);
-                if (max_c < 1) max_c = 1;
-                if (max_c >= (int)sizeof(buf)) max_c = (int)sizeof(buf) - 1;
-                int off = s_carousel_offset % flen;
-                char win[80];
-                for (int k = 0; k < max_c; k++) win[k] = buf[(off + k) % flen];
-                win[max_c] = '\0';
-                bs_gfx_text(8, y, win, g_bs_theme.accent, ts2);
-            }
+            bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts2, true);
         } else {
             if (d->has_addr && d->has_addr3)
                 snprintf(buf, sizeof buf, "%-9s %02x%02x%02x %02x%02x%02x %02x%02x%02x",
@@ -430,7 +415,7 @@ static void draw_running(void) {
                          d->addr1[0],d->addr1[1],d->addr1[2]);
             else
                 snprintf(buf, sizeof buf, "%-9s %4d", d->label, (int)d->rssi);
-            bs_gfx_text(8, y, buf, g_bs_theme.primary, ts2);
+            bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
         }
     }
     if (s_disp_count == 0)
@@ -448,18 +433,18 @@ void wifi_sniffer_run(const bs_arch_t* arch) {
     s_chmode         = SNF_CH_AUTO;
     s_channel        = 1;
     s_menu_cursor    = 0;
-    s_dirty          = true;
     s_pcap           = NULL;
     s_pkt_cursor     = 0;
     s_pkt_expanded   = false;
     s_mac_filter_mode = MAC_FILTER_NONE;
     memset(s_mac_filter_addr, 0, 6);
-    s_carousel_offset = 0;
-    s_carousel_ms     = 0;
     disp_reset();
 
+    uint32_t prev_ms = arch->millis();
     for (;;) {
         uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
 
         /* ── Input ── */
         bs_nav_id_t nav;
@@ -468,28 +453,26 @@ void wifi_sniffer_run(const bs_arch_t* arch) {
                 int n = menu_item_count();
                 switch (nav) {
                     case BS_NAV_UP:   case BS_NAV_PREV:
-                        s_menu_cursor = (s_menu_cursor + n - 1) % n; s_dirty = true; break;
+                        s_menu_cursor = (s_menu_cursor + n - 1) % n; break;
                     case BS_NAV_DOWN: case BS_NAV_NEXT:
-                        s_menu_cursor = (s_menu_cursor + 1) % n; s_dirty = true; break;
+                        s_menu_cursor = (s_menu_cursor + 1) % n; break;
                     case BS_NAV_SELECT: {
                         int item = cursor_to_item(s_menu_cursor);
                         if (item == 0) { start_sniff(arch); }
-                        else if (item == 1) { s_filter = (snf_filter_t)((s_filter+1)%SNF_FILTER_COUNT); s_dirty=true; }
-                        else if (item == 2) { s_chmode = (s_chmode==SNF_CH_AUTO)?SNF_CH_FIXED:SNF_CH_AUTO; s_dirty=true; }
-                        else if (item == 3) { s_channel=(s_channel%13)+1; s_dirty=true; }
+                        else if (item == 1) { s_filter = (snf_filter_t)((s_filter+1)%SNF_FILTER_COUNT); }
+                        else if (item == 2) { s_chmode = (s_chmode==SNF_CH_AUTO)?SNF_CH_FIXED:SNF_CH_AUTO; }
+                        else if (item == 3) { s_channel=(s_channel%13)+1; }
                         else return;
                         break;
                     }
                     case BS_NAV_LEFT: case BS_NAV_RIGHT: {
                         int item = cursor_to_item(s_menu_cursor);
                         int dir  = (nav == BS_NAV_LEFT) ? -1 : 1;
-                        if (item == 1) {
+                        if (item == 1)
                             s_filter = (snf_filter_t)((s_filter+SNF_FILTER_COUNT+dir)%SNF_FILTER_COUNT);
-                            s_dirty = true;
-                        } else if (item == 3) {
+                        else if (item == 3) {
                             if (dir > 0) s_channel=(s_channel%13)+1;
                             else         s_channel=(s_channel==1)?13:s_channel-1;
-                            s_dirty = true;
                         }
                         break;
                     }
@@ -500,7 +483,7 @@ void wifi_sniffer_run(const bs_arch_t* arch) {
                 if (s_pkt_expanded) {
                     switch (nav) {
                         case BS_NAV_SELECT: case BS_NAV_BACK:
-                            s_pkt_expanded = false; s_dirty = true; break;
+                            s_pkt_expanded = false; break;
                         case BS_NAV_LEFT: case BS_NAV_RIGHT: {
                             int dir = (nav == BS_NAV_LEFT) ? -1 : 1;
                             mac_filter_mode_t next = (mac_filter_mode_t)
@@ -520,36 +503,30 @@ void wifi_sniffer_run(const bs_arch_t* arch) {
                                     default: break;
                                 }
                             }
-                            s_dirty = true; break;
+                            break;
                         }
                         default: break;
                     }
                 } else {
                     switch (nav) {
                         case BS_NAV_BACK:
-                            stop_sniff(); s_ui_state = SNF_MENU; s_dirty = true; break;
+                            stop_sniff(); s_ui_state = SNF_MENU; break;
                         case BS_NAV_UP: case BS_NAV_PREV:
-                            if (s_pkt_cursor > 0) {
-                                s_pkt_cursor--; s_carousel_offset=0;
-                                s_carousel_ms=now; s_dirty=true;
-                            }
+                            if (s_pkt_cursor > 0) s_pkt_cursor--;
                             break;
                         case BS_NAV_DOWN: case BS_NAV_NEXT:
-                            if (s_pkt_cursor < s_disp_count-1) {
-                                s_pkt_cursor++; s_carousel_offset=0;
-                                s_carousel_ms=now; s_dirty=true;
-                            }
+                            if (s_pkt_cursor < s_disp_count-1) s_pkt_cursor++;
                             break;
                         case BS_NAV_LEFT:
                             s_filter=(snf_filter_t)((s_filter+SNF_FILTER_COUNT-1)%SNF_FILTER_COUNT);
-                            s_carousel_offset=0; s_dirty=true; break;
+                            break;
                         case BS_NAV_RIGHT:
                             s_filter=(snf_filter_t)((s_filter+1)%SNF_FILTER_COUNT);
-                            s_carousel_offset=0; s_dirty=true; break;
+                            break;
                         case BS_NAV_SELECT:
                             if (s_disp_count > 0) {
                                 s_pkt_pinned   = *disp_at_cursor();
-                                s_pkt_expanded = true; s_dirty=true;
+                                s_pkt_expanded = true;
                             }
                             break;
                         default: break;
@@ -561,22 +538,13 @@ void wifi_sniffer_run(const bs_arch_t* arch) {
         /* ── Tick ── */
         if (s_ui_state == SNF_RUNNING) {
             sniffer_svc_tick(now);   /* drains ring, calls pkt_cb */
-
-            if (!s_pkt_expanded && (now - s_carousel_ms) >= CAROUSEL_INTERVAL_MS) {
-                s_carousel_ms = now;
-                s_carousel_offset++;
-                s_dirty = true;
-            }
         }
 
-        /* ── Draw ── */
-        if (s_dirty) {
-            s_dirty = false;
-            if (s_ui_state == SNF_MENU) draw_menu();
-            else                        draw_running();
-        }
+        /* ── Draw (always redraw for smooth carousel) ── */
+        if (s_ui_state == SNF_MENU) draw_menu();
+        else                        draw_running();
 
-        arch->delay_ms(1);
+        arch->delay_ms(16);
     }
 }
 

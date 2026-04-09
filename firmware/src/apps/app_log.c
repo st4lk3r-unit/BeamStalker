@@ -58,15 +58,6 @@ static int chars_per_row(int text_w, float ts) {
     return (cpr < 1) ? 1 : cpr;
 }
 
-/*
- * entry_rows - number of display rows a single log entry occupies when wrapped.
- */
-static int entry_rows(const char* text, int cpr) {
-    int len = (int)strlen(text);
-    if (len == 0) return 1;
-    return (len + cpr - 1) / cpr;
-}
-
 /* ---- Draw -------------------------------------------------------------- */
 
 static void draw_log_view(int scroll) {
@@ -77,7 +68,6 @@ static void draw_log_view(int scroll) {
     int line_h  = bs_gfx_text_h(ts) + 2;
     int visible = (sh - hh) / line_h;
     int count   = bs_log_count();
-    int cpr     = chars_per_row(sw - 4, ts);   /* chars per display row */
 
     bs_gfx_clear(g_bs_theme.bg);
 
@@ -88,7 +78,8 @@ static void draw_log_view(int scroll) {
     bs_gfx_text(8, ty, title, g_bs_theme.primary, ts);
     bs_gfx_hline(0, hh - 1, sw, g_bs_theme.dim);
 
-    /* Entries — rendered with line wrap */
+    /* Entries — rendered with character-level line wrapping */
+    int cpr         = chars_per_row(sw - 4, ts);
     int display_row = 0;
     int last_i      = scroll - 1;   /* track highest entry actually rendered */
 
@@ -106,18 +97,23 @@ static void draw_log_view(int scroll) {
 
         bs_color_t col = bs_log_level_color(bs_log_entry_lvl(i));
 
-        int offset = 0;
-        do {
-            if (display_row >= visible) break;
-            int chunk = elen - offset;
-            if (chunk > cpr) chunk = cpr;
-            char tmp[256];
-            memcpy(tmp, buf + offset, (size_t)chunk);
-            tmp[chunk] = '\0';
-            bs_gfx_text(2, hh + display_row * line_h, tmp, col, ts);
+        int len = (int)strlen(buf);
+        if (len == 0) {
             display_row++;
-            offset += chunk;
-        } while (offset < elen);
+        } else {
+            int offset = 0;
+            do {
+                int chunk = len - offset;
+                if (chunk > cpr) chunk = cpr;
+                char line_buf[256];
+                memcpy(line_buf, buf + offset, (size_t)chunk);
+                line_buf[chunk] = '\0';
+                if (display_row < visible)
+                    bs_gfx_text(2, hh + display_row * line_h, line_buf, col, ts);
+                display_row++;
+                offset += chunk;
+            } while (offset < len && display_row <= visible);
+        }
 
         last_i = i;
     }
@@ -158,7 +154,7 @@ static void app_log_run(const bs_arch_t* arch) {
             dirty = false;
         }
 
-        arch->delay_ms(5);
+        arch->delay_ms(10);
         bs_nav_id_t nav = bs_nav_poll();
 
         switch (nav) {

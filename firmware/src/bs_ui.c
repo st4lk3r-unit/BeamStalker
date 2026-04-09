@@ -14,12 +14,13 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-static float s_text_scale   = 1.0f;
-static uint32_t s_ui_tick   = 0;
-static int  s_brightness    = 100;
-static bool s_show_voltage  = false;
-static int  s_grid_max_cols = 0;   /* 0=auto */
-static int  s_grid_max_rows = 0;   /* 0=auto */
+static float    s_text_scale   = 1.0f;
+static uint32_t s_ui_ms        = 0;   /* carousel time accumulator (ms) */
+static int      s_brightness   = 100;
+static bool     s_show_voltage = false;
+static int      s_grid_max_cols = 0;  /* 0=auto */
+static int      s_grid_max_rows = 0;  /* 0=auto */
+static bool     s_carousel     = false; /* off during boot; on after settings load */
 
 /* ---- Layout helpers --------------------------------------------------- */
 
@@ -35,7 +36,7 @@ void bs_ui_draw_header(const char* title) {
     bs_gfx_fill_rect(0, 0, sw, hh, g_bs_theme.bg);
     /* Title: carousel if it overflows the available width */
     int bat_reserve = bs_gfx_text_w("100%", ts) + 8;
-    bs_ui_draw_text_box(8, ty, sw - bat_reserve - 16, title, g_bs_theme.dim, ts);
+    bs_ui_draw_text_box(8, ty, sw - bat_reserve - 16, title, g_bs_theme.dim, ts, true);
 
     /* Battery % — rate-limited read (every ~150 calls, same cadence as menu) */
     static int  s_bat_pct   = -1;
@@ -87,11 +88,23 @@ void bs_ui_set_text_scale(float s) {
     s_text_scale = s;
 }
 
-/* ---- Carousel tick ---------------------------------------------------- */
+/* ---- Carousel time advance -------------------------------------------- */
 
-void bs_ui_tick(void) {
-    s_ui_tick++;
+/* Called by app loops with the actual elapsed ms since the previous call.
+ * This gives frame-rate-independent animation regardless of how long the
+ * draw + SPI present takes on embedded hardware. */
+void bs_ui_advance_ms(uint32_t ms) {
+    s_ui_ms += ms;
 }
+
+/* Legacy weak-symbol target called by gfx backends — now a no-op since
+ * app loops drive the clock via bs_ui_advance_ms(). */
+void bs_ui_tick(void) { }
+
+/* ---- Carousel enable/disable ------------------------------------------ */
+
+bool bs_ui_carousel_enabled(void) { return s_carousel; }
+void bs_ui_set_carousel(bool on)  { s_carousel = on; }
 
 /* ---- Text box with carousel overflow ---------------------------------- */
 
@@ -103,7 +116,7 @@ void bs_ui_tick(void) {
  * bs_gfx_present() → bs_ui_tick()).
  */
 void bs_ui_draw_text_box(int x, int y, int w,
-                          const char* text, bs_color_t col, float scale) {
+                          const char* text, bs_color_t col, float scale, bool active) {
     if (!text || w <= 0) return;
     int tw = bs_gfx_text_w(text, scale);
     if (tw <= w) {
@@ -111,34 +124,44 @@ void bs_ui_draw_text_box(int x, int y, int w,
         return;
     }
 
+    /* When inactive or carousel disabled: static clip at offset 0 */
+    if (!active || !s_carousel) {
+        bs_gfx_clip(x, y, w, bs_gfx_text_h(scale));
+        bs_gfx_text(x, y, text, col, scale);
+        bs_gfx_clip(0, 0, 0, 0);
+        return;
+    }
+
     /* Scroll range: how many pixels the text must slide */
     int scroll_range = tw - w;
 
-    /* Animation timing (all in "ticks" = frames):
-     *   PAUSE  - hold at each end before sliding
-     *   TPP    - ticks per pixel of scrolling (controls speed)
+    /* Animation timing (wall-clock milliseconds — frame-rate independent):
+     *   PAUSE_MS   - hold at each end before sliding
+     *   PX_PER_SEC - scrolling speed in pixels per second
      */
-    #define CAR_PAUSE 90       /* ~1.5 s at 60 fps */
-    #define CAR_TPP    3       /* ~20 px/s at 60 fps */
+    #define CAR_PAUSE_MS   1500   /* 1.5 s pause at each end */
+    #define CAR_PX_PER_SEC   60   /* 60 px/s slide speed     */
 
-    int slide = scroll_range * CAR_TPP;
-    if (slide < 1) slide = 1;
-    int cycle = 2 * CAR_PAUSE + 2 * slide;
-    int phase = (int)(s_ui_tick % (uint32_t)cycle);
+    /* slide_ms: time to traverse the full scroll range */
+    int slide_ms = (scroll_range * 1000) / CAR_PX_PER_SEC;
+    if (slide_ms < 1) slide_ms = 1;
+    int cycle_ms = 2 * CAR_PAUSE_MS + 2 * slide_ms;
+    int phase_ms = (int)(s_ui_ms % (uint32_t)cycle_ms);
 
     int offset;
-    if (phase < CAR_PAUSE) {
+    if (phase_ms < CAR_PAUSE_MS) {
         offset = 0;
-    } else if (phase < CAR_PAUSE + slide) {
-        offset = (phase - CAR_PAUSE) / CAR_TPP;
-    } else if (phase < 2 * CAR_PAUSE + slide) {
+    } else if (phase_ms < CAR_PAUSE_MS + slide_ms) {
+        offset = (phase_ms - CAR_PAUSE_MS) * scroll_range / slide_ms;
+    } else if (phase_ms < 2 * CAR_PAUSE_MS + slide_ms) {
         offset = scroll_range;
     } else {
-        offset = scroll_range - (phase - 2 * CAR_PAUSE - slide) / CAR_TPP;
+        offset = scroll_range
+               - (phase_ms - 2 * CAR_PAUSE_MS - slide_ms) * scroll_range / slide_ms;
     }
 
-    #undef CAR_PAUSE
-    #undef CAR_TPP
+    #undef CAR_PAUSE_MS
+    #undef CAR_PX_PER_SEC
 
     /* Clip to box, draw at offset, restore full clip */
     bs_gfx_clip(x, y, w, bs_gfx_text_h(scale));
@@ -148,18 +171,122 @@ void bs_ui_draw_text_box(int x, int y, int w,
 
 /* ---- Scroll arrows ---------------------------------------------------- */
 
+/*
+ * Draw a thin vertical scroll bar on the right edge of the content area.
+ * A filled "thumb" rectangle indicates the current scroll position.
+ * The track spans [content_y .. bottom-of-content]; the thumb is sized
+ * proportionally to (visible / total) and positioned by (scroll / total).
+ * No-op when all items fit (total <= visible).
+ */
 void bs_ui_draw_scroll_arrows(int scroll, int total, int visible) {
-    if (total <= visible) return;
+    if (total <= visible || total <= 0) return;
+
+    int sw     = bs_gfx_width();
+    int cy     = bs_ui_content_y();
+    int sh     = bs_gfx_height();
+    /* Hint line lives below content — measure it to stay above it */
+    int hint_h = bs_gfx_text_h(s_text_scale) + 6;
+
+    /* Track geometry: 2 px wide, 1 px from right edge */
+    int bar_x  = sw - 3;
+    int bar_y  = cy + 2;
+    int bar_h  = sh - hint_h - cy - 4;
+    if (bar_h < 8) return;
+
+    /* Draw dim track */
+    bs_gfx_fill_rect(bar_x, bar_y, 2, bar_h, g_bs_theme.dim);
+
+    /* Thumb size (minimum 6 px so it's always visible) */
+    int thumb_h = bar_h * visible / total;
+    if (thumb_h < 6) thumb_h = 6;
+    if (thumb_h > bar_h) thumb_h = bar_h;
+
+    /* Thumb position: proportional, clamped so thumb stays inside track */
+    int max_sc  = total - visible;
+    if (max_sc < 1) max_sc = 1;
+    int thumb_y = bar_y + (bar_h - thumb_h) * scroll / max_sc;
+    if (thumb_y < bar_y) thumb_y = bar_y;
+    if (thumb_y + thumb_h > bar_y + bar_h) thumb_y = bar_y + bar_h - thumb_h;
+
+    bs_gfx_fill_rect(bar_x, thumb_y, 2, thumb_h, g_bs_theme.primary);
+}
+
+/* ---- Scroll clamp ----------------------------------------------------- */
+
+void bs_ui_list_clamp_scroll(int cursor, int* scroll, int total, int visible) {
+    if (cursor < *scroll)             *scroll = cursor;
+    if (cursor >= *scroll + visible)  *scroll = cursor - visible + 1;
+    if (*scroll < 0)                  *scroll = 0;
+    int max_sc = total - visible;
+    if (max_sc < 0) max_sc = 0;
+    if (*scroll > max_sc)             *scroll = max_sc;
+}
+
+/* ---- Row height helpers ----------------------------------------------- */
+
+int bs_ui_row_h(float ts) {
+    return bs_gfx_text_h(ts) + 4;
+}
+
+int bs_ui_menu_row_h(float ts) {
+    float ts2 = ts > 1.0f ? ts - 0.5f : 1.0f;
+    return bs_gfx_text_h(ts) + bs_gfx_text_h(ts2) + 10;
+}
+
+int bs_ui_list_visible(float ts) {
+    int vis = bs_ui_content_h() / bs_ui_row_h(ts);
+    return vis < 1 ? 1 : vis;
+}
+
+int bs_ui_menu_visible(float ts) {
+    int vis = bs_ui_content_h() / bs_ui_menu_row_h(ts);
+    return vis < 1 ? 1 : vis;
+}
+
+/* ---- Compound row widgets --------------------------------------------- */
+
+int bs_ui_draw_menu_row(int y, const char* name, const char* desc,
+                         bool selected, float ts) {
+    float ts2 = ts > 1.0f ? ts - 0.5f : 1.0f;
     int sw = bs_gfx_width();
-    int cy = bs_ui_content_y();
-    int sh = bs_gfx_height();
-    /* Use scale=1 for arrow glyphs so they stay small and don't eat layout */
-    int th = bs_gfx_text_h(1.0f);
-    int ax = sw - bs_gfx_text_w("^", 1.0f) - 3;
-    if (scroll > 0)
-        bs_gfx_text(ax, cy + 2, "^", g_bs_theme.dim, 1.0f);
-    if (scroll + visible < total)
-        bs_gfx_text(ax, sh - th - 3, "v", g_bs_theme.dim, 1.0f);
+    int lh = bs_ui_menu_row_h(ts);
+
+    if (selected)
+        bs_gfx_fill_rect(0, y - 3, sw, lh - 1, g_bs_theme.dim);
+
+    bs_color_t nc = selected ? g_bs_theme.accent  : g_bs_theme.primary;
+    bs_color_t dc = selected ? g_bs_theme.primary : g_bs_theme.dim;
+
+    bs_ui_draw_text_box(8, y, sw - 16, name, nc, ts, selected);
+    if (desc && desc[0])
+        bs_ui_draw_text_box(8, y + bs_gfx_text_h(ts) + 2, sw - 16, desc, dc, ts2, selected);
+
+    return lh;
+}
+
+int bs_ui_draw_kv_row(int y, const char* key, const char* val,
+                       bool selected, bool warn, float ts) {
+    int sw    = bs_gfx_width();
+    int rh    = bs_ui_row_h(ts);
+    int pad_y = (rh - bs_gfx_text_h(ts)) / 2;
+    int vx    = sw / 2;
+    int avail_l = vx - 14;      /* 6 px left margin, 8 px text indent */
+    int avail_v = sw - vx - 4;
+
+    if (selected)
+        bs_gfx_fill_rect(0, y - 1, sw, rh, g_bs_theme.dim);
+
+    bs_color_t lc = selected ? g_bs_theme.secondary : g_bs_theme.dim;
+    bs_color_t vc = warn     ? g_bs_theme.warn
+                  : selected ? g_bs_theme.accent
+                             : g_bs_theme.primary;
+
+    if (avail_l > 0)
+        bs_ui_draw_text_box(6, y + pad_y, avail_l, key, lc, ts, selected);
+    if (avail_v > 0 && val)
+        bs_ui_draw_text_box(vx, y + pad_y, avail_v, val, vc, ts, selected);
+
+    return rh;
 }
 
 /* ---- Show voltage ----------------------------------------------------- */
@@ -202,10 +329,15 @@ void bs_ui_set_brightness(int pct) {
 
 void bs_ui_load_settings(void) {
     char buf[192]; size_t n = 0;
-    if (bs_fs_read_file("settings.cfg", buf, sizeof buf - 1, &n) < 0) return;
+    if (bs_fs_read_file("settings.cfg", buf, sizeof buf - 1, &n) < 0) {
+        /* No settings file: enable carousel (new-install default) */
+        s_carousel = true;
+        return;
+    }
     buf[n] = '\0';
 
     int palette_idx = 0, border_idx = -1, legacy_theme = -1;
+    bool carousel_set = false;
 
     char* line = buf;
     while (*line) {
@@ -218,6 +350,10 @@ void bs_ui_load_settings(void) {
         if (sscanf(line, "show_voltage=%d",&val) == 1) bs_ui_set_show_voltage(val != 0);
         if (sscanf(line, "grid_cols=%d",  &val) == 1) bs_ui_set_grid_max_cols(val);
         if (sscanf(line, "grid_rows=%d",  &val) == 1) bs_ui_set_grid_max_rows(val);
+        if (sscanf(line, "carousel=%d",   &val) == 1) {
+            bs_ui_set_carousel(val != 0);
+            carousel_set = true;
+        }
         /* Palette + border (new format) */
         if (sscanf(line, "palette=%d", &val) == 1) palette_idx   = val;
         if (sscanf(line, "border=%d",  &val) == 1) border_idx    = val;
@@ -226,6 +362,9 @@ void bs_ui_load_settings(void) {
         *nl = save;
         line = nl + (*nl ? 1 : 0);
     }
+
+    /* If settings file exists but has no carousel= line, default to on */
+    if (!carousel_set) s_carousel = true;
 
     /* Apply appearance — prefer new palette/border, fall back to legacy theme */
     if (border_idx >= 0) {

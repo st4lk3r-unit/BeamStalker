@@ -173,8 +173,8 @@ static void draw_scan(void) {
 }
 
 static void draw_select(void) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
     int sw  = bs_gfx_width();
     int cy  = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts) + 3;
@@ -203,7 +203,7 @@ static void draw_select(void) {
                      bs_wifi_auth_str(s_aps[idx].auth),
                      s_aps[idx].rssi);
             bs_color_t col = hl ? g_bs_theme.accent : g_bs_theme.primary;
-            bs_gfx_text(4, y, buf, col, ts);
+            bs_ui_draw_text_box(4, y, sw - 8, buf, col, ts, hl);
         }
     }
 
@@ -279,8 +279,9 @@ static void draw_passwd(void) {
 }
 
 static void draw_running(void) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
+    int sw  = bs_gfx_width();
     int y   = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts)  + 4;
     int lh2 = bs_gfx_text_h(ts2) + 3;
@@ -292,14 +293,14 @@ static void draw_running(void) {
     snprintf(buf, sizeof(buf), "%.30s  ch%d",
              s_target.ssid[0] ? s_target.ssid : "<hidden>",
              s_target.channel);
-    bs_gfx_text(8, y, buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, false);
     y += lh;
 
     wifi_sta_list_t sta = {};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients:%d  Deauth:%lu",
              sta.num, (unsigned long)s_deauth_total);
-    bs_gfx_text(8, y, buf, g_bs_theme.primary, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, false);
     y += lh2 + 2;
 
     int n_creds = wifi_portal_cred_count();
@@ -307,11 +308,11 @@ static void draw_running(void) {
         const wifi_portal_cred_t* last = wifi_portal_get_cred(n_creds - 1);
         snprintf(buf, sizeof(buf), "Creds:%d  %.16s/%.16s",
                  n_creds, last ? last->user : "", last ? last->pass : "");
-        bs_gfx_text(8, y, buf, g_bs_theme.accent, ts2);
+        bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts2, false);
         y += lh2;
     }
 
-    bs_gfx_fill_rect(4, y, bs_gfx_width() - 8, 1, g_bs_theme.dim);
+    bs_gfx_fill_rect(4, y, sw - 8, 1, g_bs_theme.dim);
     y += 4;
 
     int hint_h = bs_gfx_text_h(ts2) + 6;
@@ -322,7 +323,7 @@ static void draw_running(void) {
         bs_color_t c = (i == s_log_count - 1) ? g_bs_theme.primary : g_bs_theme.dim;
         int ly = y + i * lh2;
         if (ly + lh2 > max_y) break;
-        bs_gfx_text(8, ly, s_log[idx], c, ts2);
+        bs_ui_draw_text_box(8, ly, sw - 16, s_log[idx], c, ts2, false);
     }
 
     bs_ui_draw_hint("BACK=stop");
@@ -350,8 +351,11 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
     uint32_t last_scan_draw  = 0;
     uint32_t last_refresh    = 0;
 
+    uint32_t prev_ms = arch->millis();
     for (;;) {
         uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
 
         /* ── Portal service (RUNNING) ───────────────────────────────────── */
         if (s_phase == ET_RUNNING) {

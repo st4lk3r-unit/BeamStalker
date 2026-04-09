@@ -25,7 +25,7 @@
 /* ── Layout helpers ──────────────────────────────────────────────────────── */
 
 static int visible_rows(float ts) {
-    return bs_ui_content_h() / (bs_gfx_text_h(ts) + 3);
+    return bs_ui_list_visible(ts);
 }
 
 /* ── Draw functions ──────────────────────────────────────────────────────── */
@@ -76,7 +76,8 @@ static void draw_ap_list(int cursor, int scroll) {
                      e->selected ? 'X' : ' ',
                      e->ap.ssid[0] ? e->ap.ssid : "<hidden>",
                      e->ap.channel, e->ap.rssi);
-            bs_gfx_text(4, y, buf, hl ? g_bs_theme.accent : g_bs_theme.primary, ts);
+            bs_ui_draw_text_box(4, y, sw - 8, buf,
+                                hl ? g_bs_theme.accent : g_bs_theme.primary, ts, hl);
         }
     }
     bs_ui_draw_hint("SELECT=toggle  RIGHT=next  BACK=exit");
@@ -92,19 +93,20 @@ static void draw_sniff(void) {
     bs_gfx_clear(g_bs_theme.bg);
     bs_ui_draw_header("Sniffing Clients");
 
+    int sw_sniff = bs_gfx_width();
     snprintf(buf, sizeof buf, "Channel: %d  (%d / %d)",
              (int)deauth_svc_sniff_channel(),
              deauth_svc_sniff_ch_idx() + 1,
              deauth_svc_sniff_ch_count());
-    bs_gfx_text(8, cy, buf, g_bs_theme.primary, ts);
+    bs_ui_draw_text_box(8, cy, sw_sniff - 16, buf, g_bs_theme.primary, ts, true);
 
     snprintf(buf, sizeof buf, "Clients: %d", deauth_svc_client_count());
-    bs_gfx_text(8, cy + lh, buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, cy + lh, sw_sniff - 16, buf, g_bs_theme.accent, ts, true);
 
     uint32_t elapsed = deauth_svc_sniff_elapsed_ms();
     uint32_t remain  = elapsed < 10000 ? (10000 - elapsed) / 1000 : 0;
     snprintf(buf, sizeof buf, "Time left: %lu s", (unsigned long)remain);
-    bs_gfx_text(8, cy + 2 * lh, buf, g_bs_theme.secondary, ts);
+    bs_ui_draw_text_box(8, cy + 2 * lh, sw_sniff - 16, buf, g_bs_theme.secondary, ts, true);
 
     bs_ui_draw_hint("BACK=skip");
     bs_gfx_present();
@@ -149,7 +151,8 @@ static void draw_client_list(int cursor, int scroll) {
             bs_wifi_bssid_str(cl->mac, mac);
             snprintf(buf, sizeof buf, "[%c] %s", selected ? 'X' : ' ', mac);
         }
-        bs_gfx_text(4, y, buf, hl ? g_bs_theme.accent : g_bs_theme.primary, ts);
+            bs_ui_draw_text_box(4, y, sw - 8, buf,
+                                hl ? g_bs_theme.accent : g_bs_theme.primary, ts, hl);
     }
     bs_ui_draw_hint("SELECT=toggle  RIGHT=attack  BACK=back");
     bs_gfx_present();
@@ -166,10 +169,11 @@ static void draw_attack(void) {
     bs_gfx_clear(g_bs_theme.bg);
     bs_ui_draw_header("Deauth [RUNNING]");
 
+    int sw_atk = bs_gfx_width();
     snprintf(buf, sizeof buf, "Frames: %lu", (unsigned long)deauth_svc_frames());
-    bs_gfx_text(8, cy,      buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, cy,      sw_atk - 16, buf, g_bs_theme.accent, ts, true);
     snprintf(buf, sizeof buf, "PPS:    %lu", (unsigned long)deauth_svc_pps());
-    bs_gfx_text(8, cy + lh, buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, cy + lh, sw_atk - 16, buf, g_bs_theme.accent, ts, true);
 
     int sep_y = cy + 2 * lh + 4;
     bs_gfx_fill_rect(0, sep_y, bs_gfx_width(), 1, g_bs_theme.dim);
@@ -178,7 +182,8 @@ static void draw_attack(void) {
     int lc = deauth_svc_log_count();
     for (int i = 0; i < lc; i++) {
         bs_color_t col = (i == lc - 1) ? g_bs_theme.primary : g_bs_theme.dim;
-        bs_gfx_text(8, log_y + i * lh2, deauth_svc_log_line(i), col, ts2);
+        bs_ui_draw_text_box(8, log_y + i * lh2, bs_gfx_width() - 16,
+                            deauth_svc_log_line(i), col, ts2, (i == lc - 1));
     }
 
     bs_ui_draw_hint("BACK=stop");
@@ -192,8 +197,9 @@ static void draw_done(void) {
     char buf[32];
     bs_gfx_clear(g_bs_theme.bg);
     bs_ui_draw_header("Deauth Done");
+    int sw_done = bs_gfx_width();
     snprintf(buf, sizeof buf, "Total frames: %lu", (unsigned long)deauth_svc_frames());
-    bs_gfx_text(8, cy,      buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, cy,      sw_done - 16, buf, g_bs_theme.accent, ts, true);
     bs_gfx_text(8, cy + lh, "SELECT=restart  BACK=exit", g_bs_theme.dim, ts);
     bs_gfx_present();
 }
@@ -201,9 +207,9 @@ static void draw_done(void) {
 /* ── Scroll helpers ──────────────────────────────────────────────────────── */
 
 static void scroll_clamp(int cursor, int* scroll, int vis) {
-    if (cursor < *scroll)             *scroll = cursor;
-    if (cursor >= *scroll + vis)      *scroll = cursor - vis + 1;
-    if (*scroll < 0)                  *scroll = 0;
+    if (cursor < *scroll)        *scroll = cursor;
+    if (cursor >= *scroll + vis) *scroll = cursor - vis + 1;
+    if (*scroll < 0)             *scroll = 0;
 }
 
 /* ── Public entry point ──────────────────────────────────────────────────── */
@@ -216,14 +222,16 @@ void wifi_deauth_run(const bs_arch_t* arch) {
     bool dirty = true;
     deauth_svc_state_t prev_state = DEAUTH_SVC_IDLE;
 
-    /* Draw intervals (ms) */
     uint32_t last_draw_ms = 0;
-    static const uint32_t k_scan_draw_ms   = 100;
-    static const uint32_t k_sniff_draw_ms  = 500;
-    static const uint32_t k_attack_draw_ms = 2000;
+    static const uint32_t k_scan_draw_ms   = 100;   /* spinner update rate */
+    static const uint32_t k_sniff_draw_ms  = 500;   /* sniff counter update */
+    static const uint32_t k_carousel_ms    = 16;    /* carousel frame rate  */
 
+    uint32_t prev_ms = arch->millis();
     for (;;) {
         uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
         deauth_svc_state_t state = deauth_svc_state();
 
         /* Detect automatic state transitions → reset cursor, force redraw */
@@ -346,22 +354,21 @@ void wifi_deauth_run(const bs_arch_t* arch) {
         deauth_svc_tick(now);
         state = deauth_svc_state();
 
-        /* ── Time-gated dirty for spinner / countdown / attack stats ── */
-        switch (state) {
-            case DEAUTH_SVC_SCANNING:
-                if ((now - last_draw_ms) >= k_scan_draw_ms)
-                    { dirty = true; last_draw_ms = now; }
-                break;
-            case DEAUTH_SVC_SNIFFING:
-                if ((now - last_draw_ms) >= k_sniff_draw_ms)
-                    { dirty = true; last_draw_ms = now; }
-                break;
-            case DEAUTH_SVC_ATTACKING:
-                if ((now - last_draw_ms) >= k_attack_draw_ms)
-                    { dirty = true; last_draw_ms = now; }
-                break;
-            default:
-                break;
+        /* ── Time-gated dirty: rate depends on content type ── */
+        {
+            uint32_t interval = 0;
+            switch (state) {
+                case DEAUTH_SVC_SCANNING:     interval = k_scan_draw_ms;  break;
+                case DEAUTH_SVC_SNIFFING:     interval = k_sniff_draw_ms; break;
+                /* lists + attack log: 16 ms for smooth carousel */
+                case DEAUTH_SVC_AP_READY:
+                case DEAUTH_SVC_CLIENT_READY:
+                case DEAUTH_SVC_ATTACKING:
+                case DEAUTH_SVC_DONE:         interval = k_carousel_ms;   break;
+                default: break;
+            }
+            if (interval && (now - last_draw_ms) >= interval)
+                { dirty = true; last_draw_ms = now; }
         }
 
         /* ── Draw ── */

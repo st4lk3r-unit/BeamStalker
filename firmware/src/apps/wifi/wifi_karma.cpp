@@ -188,8 +188,9 @@ static void stop_probe_monitor(void) {
 /* ── Draw ────────────────────────────────────────────────────────────────── */
 
 static void draw_sniff(void) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
+    int sw  = bs_gfx_width();
     int y   = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts)  + 4;
     int lh2 = bs_gfx_text_h(ts2) + 3;
@@ -200,21 +201,20 @@ static void draw_sniff(void) {
     char buf[64];
     snprintf(buf, sizeof(buf), "Sniffing probes on ch%d...",
              k_sniff_channels[s_ch_idx]);
-    bs_gfx_text(8, y, buf, g_bs_theme.primary, ts);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts, false);
     y += lh;
 
     int count = __atomic_load_n(&s_ssid_count, __ATOMIC_ACQUIRE);
     snprintf(buf, sizeof(buf), "Collected: %d SSID%s",
              count, count == 1 ? "" : "s");
-    bs_gfx_text(8, y, buf, g_bs_theme.accent, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts2, false);
     y += lh2 + 6;
 
     int show = count < 5 ? count : 5;
     for (int i = count - show; i < count; i++) {
-        /* Clamp to hint line */
         if (y + lh2 > bs_gfx_height() - bs_gfx_text_h(ts2) - 6) break;
         bs_color_t c = (i == count - 1) ? g_bs_theme.accent : g_bs_theme.dim;
-        bs_gfx_text(12, y, s_ssids[i], c, ts2);
+        bs_ui_draw_text_box(12, y, sw - 20, s_ssids[i], c, ts2, false);
         y += lh2;
     }
 
@@ -223,13 +223,13 @@ static void draw_sniff(void) {
 }
 
 static void draw_select(void) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
     int sw  = bs_gfx_width();
     int cy  = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts) + 6;
     int count = __atomic_load_n(&s_ssid_count, __ATOMIC_ACQUIRE);
-    int total = count + 1;  /* +1 for "All SSIDs" at index 0 */
+    int total = count + 1;
 
     bs_gfx_clear(g_bs_theme.bg);
     bs_ui_draw_header("Karma / Target");
@@ -252,9 +252,9 @@ static void draw_select(void) {
         if (idx == 0) {
             char all_buf[40];
             snprintf(all_buf, sizeof(all_buf), "[ All %d SSIDs ]", count);
-            bs_gfx_text(8, y, all_buf, c, ts);
+            bs_ui_draw_text_box(8, y, sw - 16, all_buf, c, ts, sel);
         } else {
-            bs_gfx_text(8, y, s_ssids[idx - 1], c, ts);
+            bs_ui_draw_text_box(8, y, sw - 16, s_ssids[idx - 1], c, ts, sel);
         }
     }
 
@@ -264,8 +264,9 @@ static void draw_select(void) {
 
 
 static void draw_running(void) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
+    int sw  = bs_gfx_width();
     int y   = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts)  + 4;
     int lh2 = bs_gfx_text_h(ts2) + 3;
@@ -280,16 +281,16 @@ static void draw_running(void) {
     } else {
         snprintf(buf, sizeof(buf), "AP: %.40s  ch%d", s_target_ssid, s_ap_ch);
     }
-    bs_gfx_text(8, y, buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, false);
     y += lh;
 
     wifi_sta_list_t sta = {};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", sta.num);
-    bs_gfx_text(8, y, buf, g_bs_theme.primary, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, false);
     y += lh2 + 4;
 
-    bs_gfx_fill_rect(4, y, bs_gfx_width() - 8, 1, g_bs_theme.dim);
+    bs_gfx_fill_rect(4, y, sw - 8, 1, g_bs_theme.dim);
     y += 5;
 
     for (int i = 0; i < s_log_count && i < KA_LOG_LINES; i++) {
@@ -297,7 +298,7 @@ static void draw_running(void) {
         bs_color_t c = (i == s_log_count - 1) ? g_bs_theme.accent : g_bs_theme.dim;
         int line_y = y + i * lh2;
         if (line_y + lh2 > bs_gfx_height() - bs_gfx_text_h(ts2) - 6) break;
-        bs_gfx_text(8, line_y, s_log[idx], c, ts2);
+        bs_ui_draw_text_box(8, line_y, sw - 16, s_log[idx], c, ts2, false);
     }
 
     bs_ui_draw_hint("BACK=stop");
@@ -331,8 +332,11 @@ extern "C" void wifi_karma_run(const bs_arch_t* arch) {
     bs_wifi_monitor_start(k_sniff_channels[s_ch_idx], probe_cb, NULL);
     ka_log("Sniffing ch%d for probes...", k_sniff_channels[s_ch_idx]);
 
+    uint32_t prev_ms = arch->millis();
     for (;;) {
         uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
 
         /* ── Portal service (RUNNING) ───────────────────────────────────── */
         if (s_phase == KA_RUNNING && wifi_portal_active()) {

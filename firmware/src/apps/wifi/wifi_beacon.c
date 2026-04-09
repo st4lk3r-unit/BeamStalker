@@ -48,10 +48,8 @@ static bcn_ui_state_t s_ui_state;
 static beacon_svc_mode_t s_mode;
 static wifi_charset_t    s_charset;
 static int               s_cursor;
-static bool              s_dirty;
 static char              s_prefix[PREFIX_MAX_LEN];
 static int               s_repeat_idx;
-static uint32_t          s_last_draw_ms;
 
 static char s_file_ssids[MAX_FILE_SSIDS][SSID_MAX_LEN];
 static int  s_file_ssid_count;
@@ -102,7 +100,6 @@ static int get_rows(bcn_row_t rows[6]) {
 
 static void run_prefix_edit(const bs_arch_t* arch) {
     int len = (int)strlen(s_prefix);
-    bool dirty = true;
     for (;;) {
         bs_key_t key;
         while (bs_keys_poll(&key)) {
@@ -111,31 +108,30 @@ static void run_prefix_edit(const bs_arch_t* arch) {
                     && len < PREFIX_MAX_LEN - 1) {
                     s_prefix[len++] = key.ch;
                     s_prefix[len]   = '\0';
-                    dirty = true;
                 }
             } else if (key.id == BS_KEY_BACK || key.id == BS_KEY_ESC) {
-                if (len > 0) { s_prefix[--len] = '\0'; dirty = true; }
+                if (len > 0) { s_prefix[--len] = '\0'; }
                 else return;
             } else if (key.id == BS_KEY_ENTER) return;
         }
-        if (dirty) {
-            dirty = false;
+        {
             float ts = bs_ui_text_scale();
             int cy = bs_ui_content_y(), lh = bs_gfx_text_h(ts) + 4;
             char buf[PREFIX_MAX_LEN + 8];
             bs_gfx_clear(g_bs_theme.bg);
             bs_ui_draw_header("Custom Prefix");
+            int sw_pfx = bs_gfx_width();
             bs_gfx_text(8, cy, "Enter AP name prefix:", g_bs_theme.secondary, ts);
             snprintf(buf, sizeof buf, "%s_", s_prefix[0] ? s_prefix : "");
-            bs_gfx_text(8, cy + lh + 2, buf, g_bs_theme.accent, ts);
+            bs_ui_draw_text_box(8, cy + lh + 2, sw_pfx - 16, buf, g_bs_theme.accent, ts, true);
             char preview[SSID_MAX_LEN + 16];
             snprintf(preview, sizeof preview, "e.g.  %s042",
                      s_prefix[0] ? s_prefix : "testAP");
-            bs_gfx_text(8, cy + 2*lh + 6, preview, g_bs_theme.dim, ts);
+            bs_ui_draw_text_box(8, cy + 2*lh + 6, sw_pfx - 16, preview, g_bs_theme.dim, ts, true);
             bs_ui_draw_hint("type  BACK=del  SELECT=ok");
             bs_gfx_present();
         }
-        arch->delay_ms(5);
+        arch->delay_ms(16);
     }
 }
 
@@ -183,8 +179,8 @@ static void draw_menu(void) {
             case ROW_START:   snprintf(left, sizeof left, "Start"); break;
             case ROW_BACK:    snprintf(left, sizeof left, "Back"); break;
         }
-        bs_gfx_text(8, y, left, lc, ts);
-        if (right[0]) bs_gfx_text(val_x, y, right, vc, ts);
+        bs_ui_draw_text_box(8, y, val_x - 12, left, lc, ts, sel);
+        if (right[0]) bs_ui_draw_text_box(val_x, y, sw - val_x - 4, right, vc, ts, sel);
     }
 
     if (s_mode == BEACON_MODE_FILE) {
@@ -209,22 +205,23 @@ static void draw_running(void) {
     bs_gfx_clear(g_bs_theme.bg);
     bs_ui_draw_header("Beacon Spam [ON]");
 
+    int sw_run = bs_gfx_width();
     snprintf(buf, sizeof buf, "SSID     %s", beacon_svc_cur_ssid());
-    bs_gfx_text(8, cy, buf, g_bs_theme.primary, ts);
+    bs_ui_draw_text_box(8, cy, sw_run - 16, buf, g_bs_theme.primary, ts, true);
 
     char bstr[18]; bs_wifi_bssid_str(beacon_svc_cur_bssid(), bstr);
     snprintf(buf, sizeof buf, "BSSID    %s  ch %d", bstr, (int)beacon_svc_cur_channel());
-    bs_gfx_text(8, cy + lh, buf, g_bs_theme.secondary, ts);
+    bs_ui_draw_text_box(8, cy + lh, sw_run - 16, buf, g_bs_theme.secondary, ts, true);
 
     snprintf(buf, sizeof buf, "Frames   %lu", (unsigned long)beacon_svc_frames());
-    bs_gfx_text(8, cy + 2*lh, buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, cy + 2*lh, sw_run - 16, buf, g_bs_theme.accent, ts, true);
 
     snprintf(buf, sizeof buf, "PPS      %lu", (unsigned long)beacon_svc_pps());
-    bs_gfx_text(8, cy + 3*lh, buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, cy + 3*lh, sw_run - 16, buf, g_bs_theme.accent, ts, true);
 
     snprintf(buf, sizeof buf, "Repeat   %s  (%d left)",
              k_repeat_names[s_repeat_idx], beacon_svc_burst_left());
-    bs_gfx_text(8, cy + 4*lh, buf, g_bs_theme.dim, ts);
+    bs_ui_draw_text_box(8, cy + 4*lh, sw_run - 16, buf, g_bs_theme.dim, ts, true);
 
     bs_ui_draw_hint("BACK=stop");
     bs_gfx_present();
@@ -238,9 +235,7 @@ void wifi_beacon_run(const bs_arch_t* arch) {
     s_mode       = BEACON_MODE_RANDOM;
     s_charset    = WIFI_CHARSET_ASCII;
     s_cursor     = 0;
-    s_dirty      = true;
     s_repeat_idx = 2;
-    s_last_draw_ms = 0;
     if (!s_prefix[0]) strncpy(s_prefix, "testAP", PREFIX_MAX_LEN - 1);
     load_ssids_from_file();
 
@@ -256,14 +251,17 @@ void wifi_beacon_run(const bs_arch_t* arch) {
         return;
     }
 
+    uint32_t prev_ms = arch->millis();
     for (;;) {
         uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
 
         /* ── Input ── */
         bs_nav_id_t nav;
         while ((nav = bs_nav_poll()) != BS_NAV_NONE) {
             if (s_ui_state == BCN_RUNNING) {
-                if (nav == BS_NAV_BACK) { beacon_svc_stop(); s_ui_state = BCN_MENU; s_dirty = true; }
+                if (nav == BS_NAV_BACK) { beacon_svc_stop(); s_ui_state = BCN_MENU; }
                 continue;
             }
             bcn_row_t rows[6];
@@ -275,28 +273,25 @@ void wifi_beacon_run(const bs_arch_t* arch) {
 
             switch (nav) {
                 case BS_NAV_UP: case BS_NAV_PREV:
-                    s_cursor = (s_cursor + n - 1) % n; s_dirty = true; break;
+                    s_cursor = (s_cursor + n - 1) % n; break;
                 case BS_NAV_DOWN: case BS_NAV_NEXT:
-                    s_cursor = (s_cursor + 1) % n; s_dirty = true; break;
+                    s_cursor = (s_cursor + 1) % n; break;
                 case BS_NAV_SELECT: case BS_NAV_RIGHT:
                     if (row == ROW_MODE) {
                         s_mode = (beacon_svc_mode_t)((s_mode + 1) % 3);
                         if (s_cursor >= get_rows(rows)) s_cursor = 0;
-                        s_dirty = true;
                     } else if (row == ROW_CHARSET) {
-                        CYCLE_RIGHT(s_charset, WIFI_CHARSET_COUNT); s_dirty = true;
+                        CYCLE_RIGHT(s_charset, WIFI_CHARSET_COUNT);
                     } else if (row == ROW_PREFIX) {
-                        run_prefix_edit(arch); s_dirty = true;
+                        run_prefix_edit(arch);
                     } else if (row == ROW_REPEAT) {
-                        CYCLE_RIGHT(s_repeat_idx, N_REPEAT); s_dirty = true;
+                        CYCLE_RIGHT(s_repeat_idx, N_REPEAT);
                     } else if (row == ROW_START) {
                         beacon_svc_start(s_mode, s_charset, s_prefix,
                                          k_repeat_vals[s_repeat_idx],
                                          (const char(*)[33])s_file_ssids,
                                          s_file_ssid_count);
                         s_ui_state = BCN_RUNNING;
-                        s_last_draw_ms = 0;
-                        s_dirty = false;
                     } else if (row == ROW_BACK) {
                         return;
                     }
@@ -305,11 +300,10 @@ void wifi_beacon_run(const bs_arch_t* arch) {
                     if (row == ROW_MODE) {
                         s_mode = (beacon_svc_mode_t)((s_mode + 2) % 3);
                         if (s_cursor >= get_rows(rows)) s_cursor = 0;
-                        s_dirty = true;
                     } else if (row == ROW_CHARSET) {
-                        CYCLE_LEFT(s_charset, WIFI_CHARSET_COUNT); s_dirty = true;
+                        CYCLE_LEFT(s_charset, WIFI_CHARSET_COUNT);
                     } else if (row == ROW_REPEAT) {
-                        CYCLE_LEFT(s_repeat_idx, N_REPEAT); s_dirty = true;
+                        CYCLE_LEFT(s_repeat_idx, N_REPEAT);
                     }
                     break;
                 case BS_NAV_BACK: return;
@@ -319,19 +313,15 @@ void wifi_beacon_run(const bs_arch_t* arch) {
 #undef CYCLE_RIGHT
         }
 
-        /* ── Tick & draw ── */
+        /* ── Tick & draw (always redraw for smooth carousel) ── */
         if (s_ui_state == BCN_RUNNING) {
             beacon_svc_tick(now);
-            if ((now - s_last_draw_ms) >= RUNNING_DRAW_INTERVAL_MS) {
-                s_last_draw_ms = now;
-                draw_running();
-            }
-        } else if (s_dirty) {
-            s_dirty = false;
+            draw_running();
+        } else {
             draw_menu();
         }
 
-        arch->delay_ms(1);
+        arch->delay_ms(16);
     }
 }
 
