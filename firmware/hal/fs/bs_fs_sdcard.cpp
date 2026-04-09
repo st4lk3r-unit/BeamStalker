@@ -5,7 +5,7 @@
  */
 #ifdef BS_FS_SDCARD
 #include "bs/bs_fs.h"
-#include "bs/bs_hw.h"
+#include "bs/bs_board.h"
 #include <Arduino.h>
 #include <SPI.h>
 #include <SD.h>
@@ -47,36 +47,12 @@ static bool        s_available   = false;
 static const char* s_init_error  = NULL;
 
 int bs_fs_init(void) {
-    /*
-     * SPI bus is already initialised by SGFX (SGFX_PIN_MISO=33 is set).
-     * Do NOT call SPI.end() - that leaves the display CS pin (SGFX_PIN_CS=38)
-     * in an undefined / LOW state, which selects the ST7796 simultaneously
-     * and causes SPI bus contention during SD card init.
-     *
-     * Instead: explicitly pull the display CS HIGH so the display is deselected,
-     * then talk to the SD card on the already-configured SPI bus.
-     */
-#if defined(SGFX_PIN_CS) && SGFX_PIN_CS >= 0
-    pinMode(SGFX_PIN_CS, OUTPUT);
-    digitalWrite(SGFX_PIN_CS, HIGH);
-#endif
-    /* Deselect ALL SPI bus peers before touching the bus.
-     * NFC and LoRa CS pins float or default LOW at boot, which selects those
-     * chips simultaneously and causes SPI bus contention → sdSelectCard fails. */
-#if defined(BS_LORA_CS_PIN) && BS_LORA_CS_PIN >= 0
-    pinMode(BS_LORA_CS_PIN, OUTPUT);
-    digitalWrite(BS_LORA_CS_PIN, HIGH);
-#endif
-#if defined(BS_NFC_CS_PIN) && BS_NFC_CS_PIN >= 0
-    pinMode(BS_NFC_CS_PIN, OUTPUT);
-    digitalWrite(BS_NFC_CS_PIN, HIGH);
-#endif
+    /* Let the board layer deselect any shared SPI peers before SD.begin(). */
+    bs_board_prepare_fs_mount();
 
-    delay(50);   /* short settle after display CS deselect */
-
-    /* Check SD card detect pin (XL9555 P12) before attempting SPI init */
+    /* Check board-specific SD detect before attempting SPI init. */
     {
-        int det = bs_hw_sd_detect();
+        int det = bs_board_sd_detect();
         if (det == 0) {
             s_init_error = "no card detected (SD_DET/P12 high)";
             return -1;
@@ -112,10 +88,7 @@ int bs_fs_format(void) {
     s_available  = false;
     s_init_error = NULL;
 
-#if defined(SGFX_PIN_CS) && SGFX_PIN_CS >= 0
-    pinMode(SGFX_PIN_CS, OUTPUT);
-    digitalWrite(SGFX_PIN_CS, HIGH);
-#endif
+    bs_board_prepare_fs_mount();
     delay(200);
 
     /*

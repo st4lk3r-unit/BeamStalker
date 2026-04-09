@@ -38,19 +38,6 @@ int  bs_hw_battery_pct(void);
 int  bs_hw_battery_mv(void);
 
 /*
- * XL9555 GPIO expander Port-1 diagnostic snapshot.
- */
-typedef struct {
-    int     reachable;  /* 0 = I2C NACK/error, 1 = OK */
-    uint8_t input_1;
-    uint8_t output_1;
-    uint8_t config_1;
-} bs_hw_xl9555_t;
-
-void bs_hw_xl9555_read(bs_hw_xl9555_t* out);
-int  bs_hw_sd_detect(void);
-
-/*
  * FreeRTOS task snapshot.
  *   stack_hwm_b : stack headroom remaining in bytes (high-water mark).
  *                 Lower = closer to overflow.

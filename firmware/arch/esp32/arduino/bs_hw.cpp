@@ -81,29 +81,6 @@ extern "C" int bs_hw_battery_mv(void) {
     return 0;
 }
 
-/* ---- XL9555 GPIO expander diagnostic ----------------------------------- */
-
-extern "C" void bs_hw_xl9555_read(bs_hw_xl9555_t* out) {
-    if (!out) return;
-    out->reachable = 0;
-    out->input_1 = out->output_1 = out->config_1 = 0xFF;
-#ifdef BS_USE_SIC
-    uint8_t reg;
-    reg = 0x01; if (sic_i2c_writeread(0, 0x20, &reg, 1, &out->input_1,  1) < 0) return;
-    reg = 0x03; if (sic_i2c_writeread(0, 0x20, &reg, 1, &out->output_1, 1) < 0) return;
-    reg = 0x07; if (sic_i2c_writeread(0, 0x20, &reg, 1, &out->config_1, 1) < 0) return;
-    out->reachable = 1;
-#endif
-}
-
-extern "C" int bs_hw_sd_detect(void) {
-#ifdef BS_USE_SIC
-    uint8_t reg = 0x01, val = 0xFF;
-    if (sic_i2c_writeread(0, 0x20, &reg, 1, &val, 1) < 0) return -1;
-    return (val & (1 << 2)) ? 0 : 1;  /* P12=SD_DET: LOW=card, HIGH=no card */
-#endif
-    return -1;
-}
 
 /* ---- FreeRTOS task list ------------------------------------------------- */
 

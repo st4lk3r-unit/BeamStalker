@@ -34,6 +34,7 @@
 #include "bs/bs_fs.h"
 #include "bs/bs_wifi.h"
 #include "bs/bs_ble.h"
+#include "bs/bs_board.h"
 #include <stdio.h>
 #include <string.h>
 #include "bs/bs_assets.h"
@@ -128,19 +129,14 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     /* --- Component initialisation log entries --------------------------- */
 
     /* arch */
-#if defined(VARIANT_TPAGER)
-    BS_LOGOK("arch", "ESP32-S3 arduino - T-Pager");
-#elif defined(VARIANT_TDONGLE_S3)
-    BS_LOGOK("arch", "ESP32-S3 arduino - T-Dongle-S3");
-#elif defined(VARIANT_CARDPUTER)
-    BS_LOGOK("arch", "ESP32-S3 arduino - Cardputer");
-#elif defined(VARIANT_HELTEC_V3)
-    BS_LOGOK("arch", "ESP32-S3 arduino - Heltec V3");
-#elif defined(VARIANT_NATIVE)
-    BS_LOGOK("arch", "POSIX native linux");
-#else
-    BS_LOGOK("arch", "unknown variant");
-#endif
+    {
+        const bs_board_desc_t* bd = bs_board_desc();
+        char buf[96];
+        snprintf(buf, sizeof(buf), "%s - %s",
+                 bd && bd->arch_desc ? bd->arch_desc : "unknown arch",
+                 bd && bd->name ? bd->name : "unknown board");
+        BS_LOGOK("arch", buf);
+    }
     arch->delay_ms(80);
 
     /* console */
@@ -174,23 +170,11 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     arch->delay_ms(80);
 
     /* keyboard */
-#ifdef BS_KEYS_SIC
-#  if defined(VARIANT_CARDPUTER)
-    BS_LOGOK("keyboard", "74HC138 56-key matrix");
-    arch->delay_ms(120);
-#  else
-    BS_LOGOK("keyboard", "TCA8418 64-key matrix");
-    arch->delay_ms(120);
-    BS_LOGOK("encoder", "rotary input active");
-    arch->delay_ms(60);
-#  endif
-#elif defined(BS_KEYS_GPIO)
-    BS_LOGOK("keyboard", "single key: short=next  double=back  long=enter");
-    arch->delay_ms(100);
-#elif defined(BS_KEYS_NATIVE)
-    BS_LOGOK("keyboard", "raw terminal input");
-    arch->delay_ms(60);
-#endif
+    {
+        const bs_board_desc_t* bd = bs_board_desc();
+        BS_LOGOK("keyboard", (bd && bd->keyboard_desc) ? bd->keyboard_desc : "not configured");
+        arch->delay_ms(100);
+    }
 
     /* audio (SIC codec - future) */
 #ifdef BS_USE_SIC

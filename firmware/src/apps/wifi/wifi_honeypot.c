@@ -28,8 +28,8 @@
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 #include "bs/bs_arch.h"
+#include "bs/bs_board.h"
 
-#include "esp_wifi.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -339,9 +339,8 @@ static void draw_running(uint32_t now) {
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
-    wifi_sta_list_t sta = (wifi_sta_list_t){0};
-    esp_wifi_ap_get_sta_list(&sta);
-    snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", sta.num);
+    int n_clients = wifi_portal_client_count();
+    snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", n_clients < 0 ? 0 : n_clients);
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
     y += lh2;
 
@@ -395,21 +394,22 @@ void wifi_honeypot_run(const bs_arch_t* arch) {
         if (s_phase == HP_RUNNING && wifi_portal_active()) {
             wifi_portal_poll();
 
-            wifi_sta_list_t sta = (wifi_sta_list_t){0};
-            esp_wifi_ap_get_sta_list(&sta);
-            if (sta.num > s_prev_clients) {
-                for (int i = s_prev_clients; i < (int)sta.num; i++) {
+            bs_wifi_sta_t sta[8];
+            int sta_count = bs_wifi_ap_client_list(sta, 8);
+            if (sta_count < 0) sta_count = 0;
+            if (sta_count > s_prev_clients) {
+                for (int i = s_prev_clients; i < sta_count; i++) {
                     hp_log("Client %02X:%02X:%02X:.. joined",
-                           sta.sta[i].mac[0],
-                           sta.sta[i].mac[1],
-                           sta.sta[i].mac[2]);
+                           sta[i].mac[0],
+                           sta[i].mac[1],
+                           sta[i].mac[2]);
                 }
                 dirty = true;
-            } else if (sta.num < s_prev_clients) {
+            } else if (sta_count < s_prev_clients) {
                 hp_log("Client disconnected");
                 dirty = true;
             }
-            s_prev_clients = sta.num;
+            s_prev_clients = sta_count;
 
             /* Periodic lure injection */
             if (s_lure_last_ms == 0) s_lure_last_ms = now;
@@ -588,11 +588,10 @@ void wifi_honeypot_run(const bs_arch_t* arch) {
             dirty = true;
         }
 
-#if defined(VARIANT_TPAGER) || defined(VARIANT_TDONGLE_S3) || defined(VARIANT_HELTEC_V3)
-        arch->delay_ms(s_phase == HP_RUNNING ? 2 : 1);
-#else
-        arch->delay_ms(s_phase == HP_RUNNING ? 10 : 5);
-#endif
+        if (bs_board_caps() & BS_BOARD_CAP_FAST_UI)
+            arch->delay_ms(s_phase == HP_RUNNING ? 2 : 1);
+        else
+            arch->delay_ms(s_phase == HP_RUNNING ? 10 : 5);
     }
 }
 
