@@ -1,5 +1,5 @@
 /*
- * wifi_eviltwin.cpp - Evil Twin sub-application.
+ * wifi_eviltwin.c - Evil Twin sub-application.
  *
  * Flow:
  *   ET_SCAN    - async AP scan (spinner)
@@ -27,14 +27,12 @@
 
 #include "wifi_eviltwin.h"
 
-extern "C" {
 #include "bs/bs_wifi.h"
 #include "bs/bs_gfx.h"
 #include "bs/bs_nav.h"
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 #include "bs/bs_arch.h"
-}
 
 #include "esp_wifi.h"
 
@@ -297,7 +295,7 @@ static void draw_running(void) {
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
-    wifi_sta_list_t sta = {};
+    wifi_sta_list_t sta = (wifi_sta_list_t){0};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients:%d  Deauth:%lu",
              sta.num, (unsigned long)s_deauth_total);
@@ -333,7 +331,7 @@ static void draw_running(void) {
 
 /* ── Main entry ──────────────────────────────────────────────────────────── */
 
-extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
+void wifi_eviltwin_run(const bs_arch_t* arch) {
     s_phase         = ET_SCAN;
     s_cursor        = 0;
     s_scroll        = 0;
@@ -364,7 +362,7 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
             if (wifi_portal_active()) {
                 wifi_portal_poll();
 
-                wifi_sta_list_t sta = {};
+                wifi_sta_list_t sta = (wifi_sta_list_t){0};
                 esp_wifi_ap_get_sta_list(&sta);
                 if (sta.num > s_prev_clients) {
                     for (int i = s_prev_clients; i < (int)sta.num; i++) {
@@ -434,7 +432,7 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
                         s_phase = ET_PASSWD;
                     } else {
                         /* Open: launch immediately */
-                        if (wifi_portal_start(s_target.ssid, s_target.channel, nullptr)) {
+                        if (wifi_portal_start(s_target.ssid, s_target.channel, NULL)) {
                             et_log("Clone open ch%d  %.20s",
                                    s_target.channel, s_target.ssid);
                             s_deauth_total = 0;
@@ -464,10 +462,10 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
                 } else if (nav == BS_NAV_RIGHT) {
                     if (s_passwd_pos < ET_MAX_PASS_LEN - 1) { s_passwd_pos++; s_dirty = true; }
                 } else if (nav == BS_NAV_SELECT || nav == BS_NAV_BACK) {
-                    const char* pw   = (nav == BS_NAV_SELECT) ? trimmed_passwd() : nullptr;
+                    const char* pw   = (nav == BS_NAV_SELECT) ? trimmed_passwd() : NULL;
                     bool use_wpa2    = (pw && strlen(pw) >= 8);
                     if (wifi_portal_start(s_target.ssid, s_target.channel,
-                                          use_wpa2 ? pw : nullptr)) {
+                                          use_wpa2 ? pw : NULL)) {
                         if (use_wpa2)
                             et_log("Clone WPA2 ch%d  %.18s",
                                    s_target.channel, s_target.ssid);

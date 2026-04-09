@@ -1,5 +1,5 @@
 /*
- * wifi_karma.cpp - KARMA attack sub-application.
+ * wifi_karma.c - KARMA attack sub-application.
  *
  * Devices broadcast directed probe requests for previously known SSIDs.
  * We sniff them, then stand up an open AP matching the requested SSID and
@@ -20,14 +20,12 @@
 
 #include "wifi_karma.h"
 
-extern "C" {
 #include "bs/bs_wifi.h"
 #include "bs/bs_gfx.h"
 #include "bs/bs_nav.h"
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 #include "bs/bs_arch.h"
-}
 
 #include "esp_wifi.h"
 
@@ -129,9 +127,9 @@ static void probe_cb(const uint8_t* frame, uint16_t len,
 static void ap_probe_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
     if (type != WIFI_PKT_MGMT) return;
     const wifi_promiscuous_pkt_t* pkt =
-        reinterpret_cast<const wifi_promiscuous_pkt_t*>(buf);
+        (const wifi_promiscuous_pkt_t*)buf;
     const uint8_t* f = pkt->payload;
-    uint16_t len = static_cast<uint16_t>(pkt->rx_ctrl.sig_len);
+    uint16_t len = (uint16_t)pkt->rx_ctrl.sig_len;
     if (len >= 4) len -= 4;
     if (len < 28) return;
     if ((f[0] & 0xFC) != 0x40) return;   /* not a probe request */
@@ -174,7 +172,7 @@ static void send_probe_response(const uint8_t* client_mac, const char* ssid) {
 }
 
 static void start_probe_monitor(void) {
-    wifi_promiscuous_filter_t f = {};
+    wifi_promiscuous_filter_t f = (wifi_promiscuous_filter_t){0};
     f.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
     esp_wifi_set_promiscuous_filter(&f);
     esp_wifi_set_promiscuous_rx_cb(ap_probe_cb);
@@ -310,7 +308,7 @@ static void draw_running(void) {
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
-    wifi_sta_list_t sta = {};
+    wifi_sta_list_t sta = (wifi_sta_list_t){0};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", sta.num);
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
@@ -333,7 +331,7 @@ static void draw_running(void) {
 
 /* ── Main entry ──────────────────────────────────────────────────────────── */
 
-extern "C" void wifi_karma_run(const bs_arch_t* arch) {
+void wifi_karma_run(const bs_arch_t* arch) {
     s_phase         = KA_SNIFF;
     s_cursor        = 0;
     s_ch_idx        = 0;
@@ -377,7 +375,7 @@ extern "C" void wifi_karma_run(const bs_arch_t* arch) {
                 dirty = true;
             }
 
-            wifi_sta_list_t sta = {};
+            wifi_sta_list_t sta = (wifi_sta_list_t){0};
             esp_wifi_ap_get_sta_list(&sta);
             if (sta.num > s_prev_clients) {
                 for (int i = s_prev_clients; i < (int)sta.num; i++) {
@@ -448,7 +446,7 @@ extern "C" void wifi_karma_run(const bs_arch_t* arch) {
                     const char* ap_ssid = s_karma_auto
                                           ? (count > 0 ? s_ssids[0] : "FreeWifi")
                                           : s_target_ssid;
-                    if (wifi_portal_start(ap_ssid, s_ap_ch, nullptr)) {
+                    if (wifi_portal_start(ap_ssid, s_ap_ch, NULL)) {
                         ka_log("AP open ch%d  %.20s", s_ap_ch, ap_ssid);
                         start_probe_monitor();
                         s_probe_pending = false;

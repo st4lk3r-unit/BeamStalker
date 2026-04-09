@@ -1,5 +1,5 @@
 /*
- * wifi_honeypot.cpp - Rogue AP / honeypot sub-application.
+ * wifi_honeypot.c - Rogue AP / honeypot sub-application.
  *
  * Flow:
  *   MODE    - choose attack style:
@@ -22,14 +22,12 @@
 
 #include "wifi_honeypot.h"
 
-extern "C" {
 #include "bs/bs_wifi.h"
 #include "bs/bs_gfx.h"
 #include "bs/bs_nav.h"
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 #include "bs/bs_arch.h"
-}
 
 #include "esp_wifi.h"
 
@@ -341,7 +339,7 @@ static void draw_running(uint32_t now) {
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
-    wifi_sta_list_t sta = {};
+    wifi_sta_list_t sta = (wifi_sta_list_t){0};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", sta.num);
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
@@ -371,7 +369,7 @@ static void draw_running(uint32_t now) {
 
 /* ── Main entry ──────────────────────────────────────────────────────────── */
 
-extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
+void wifi_honeypot_run(const bs_arch_t* arch) {
     s_phase        = HP_MODE;
     s_attack       = HP_BROADCAST;
     s_ap_count     = 0;
@@ -397,7 +395,7 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
         if (s_phase == HP_RUNNING && wifi_portal_active()) {
             wifi_portal_poll();
 
-            wifi_sta_list_t sta = {};
+            wifi_sta_list_t sta = (wifi_sta_list_t){0};
             esp_wifi_ap_get_sta_list(&sta);
             if (sta.num > s_prev_clients) {
                 for (int i = s_prev_clients; i < (int)sta.num; i++) {
@@ -421,7 +419,7 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
                 /* Brief AP pause to inject on target channel */
                 wifi_portal_stop();
                 inject_lure();
-                wifi_portal_start(s_target_ssid, s_hp_ch);
+                wifi_portal_start(s_target_ssid, s_hp_ch, NULL);
                 hp_log("Lure done, AP back on ch%d", s_hp_ch);
                 dirty = true;
             }
@@ -445,7 +443,7 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
                 bs_wifi_monitor_stop();
                 hp_log("Found %d client(s)", s_client_count);
                 /* Start AP and enter RUNNING */
-                if (wifi_portal_start(s_target_ssid, s_hp_ch)) {
+                if (wifi_portal_start(s_target_ssid, s_hp_ch, NULL)) {
                     hp_log("AP up ch%d  IP: 192.168.4.1", s_hp_ch);
                     s_lure_last_ms = now;
                     s_phase        = HP_RUNNING;
@@ -518,7 +516,7 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
                         s_phase = HP_SNIFF;
                     } else {
                         /* Broadcast: start AP immediately */
-                        if (wifi_portal_start(s_target_ssid, s_hp_ch)) {
+                        if (wifi_portal_start(s_target_ssid, s_hp_ch, NULL)) {
                             hp_log("AP up ch%d  IP: 192.168.4.1", s_hp_ch);
                             s_lure_last_ms = now;
                             s_phase        = HP_RUNNING;
@@ -543,7 +541,7 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
                     /* Skip remaining sniff, start AP now */
                     bs_wifi_monitor_stop();
                     hp_log("Sniff skipped, %d client(s)", s_client_count);
-                    if (wifi_portal_start(s_target_ssid, s_hp_ch)) {
+                    if (wifi_portal_start(s_target_ssid, s_hp_ch, NULL)) {
                         hp_log("AP up ch%d  IP: 192.168.4.1", s_hp_ch);
                         s_lure_last_ms = now;
                         s_phase        = HP_RUNNING;

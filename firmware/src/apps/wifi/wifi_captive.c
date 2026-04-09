@@ -1,5 +1,5 @@
 /*
- * wifi_captive.cpp - Manual captive portal sub-application.
+ * wifi_captive.c - Manual captive portal sub-application.
  *
  * Flow:
  *   SSID_EDIT   - type a custom SSID using character cycling
@@ -24,14 +24,12 @@
 
 #include "wifi_captive.h"
 
-extern "C" {
 #include "bs/bs_wifi.h"
 #include "bs/bs_gfx.h"
 #include "bs/bs_nav.h"
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 #include "bs/bs_arch.h"
-}
 
 #include "esp_wifi.h"
 
@@ -206,7 +204,7 @@ static void draw_running(void) {
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
-    wifi_sta_list_t sta = {};
+    wifi_sta_list_t sta = (wifi_sta_list_t){0};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", sta.num);
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
@@ -251,7 +249,7 @@ static void draw_running(void) {
 
 /* ── Main entry ──────────────────────────────────────────────────────────── */
 
-extern "C" void wifi_captive_run(const bs_arch_t* arch) {
+void wifi_captive_run(const bs_arch_t* arch) {
     s_phase        = CP_SSID_EDIT;
     s_channel      = 1;
     s_edit_pos     = 0;
@@ -280,7 +278,7 @@ extern "C" void wifi_captive_run(const bs_arch_t* arch) {
         if (s_phase == CP_RUNNING && wifi_portal_active()) {
             wifi_portal_poll();
 
-            wifi_sta_list_t sta = {};
+            wifi_sta_list_t sta = (wifi_sta_list_t){0};
             esp_wifi_ap_get_sta_list(&sta);
             if (sta.num > s_prev_clients) {
                 for (int i = s_prev_clients; i < (int)sta.num; i++) {
@@ -329,7 +327,7 @@ extern "C" void wifi_captive_run(const bs_arch_t* arch) {
                 } else if (nav == BS_NAV_SELECT) {
                     const char* ssid = trimmed_ssid();
                     cp_log("Starting AP: %.28s ch%d", ssid, s_channel);
-                    if (wifi_portal_start(ssid, s_channel)) {
+                    if (wifi_portal_start(ssid, s_channel, NULL)) {
                         cp_log("AP up at 192.168.4.1");
                         cp_log("Serving captive portal...");
                         s_phase      = CP_RUNNING;

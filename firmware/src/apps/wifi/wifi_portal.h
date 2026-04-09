@@ -1,15 +1,19 @@
 /*
  * wifi_portal.h - Shared SoftAP + DNS + HTTP captive portal.
  *
- * Used by wifi_honeypot.cpp, wifi_karma.cpp, wifi_captive.cpp.
+ * Used by the WiFi portal-oriented apps.
  *
  * All functions are no-ops unless compiled with BS_WIFI_ESP32 + ARDUINO_ARCH_ESP32.
- * Call from C++ only.
+ * Public declarations keep a C ABI so surrounding app state machines can stay
+ * in plain C even though the implementation remains Arduino/C++.
  */
 #pragma once
-#ifdef __cplusplus
-
+#include <stdbool.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* ── Credential storage ──────────────────────────────────────────────────── */
 
@@ -43,12 +47,12 @@ typedef struct {
  */
 /*
  * password - optional WPA2 PSK (must be 8-63 chars to activate WPA2).
- *            Pass nullptr or "" for an open AP.
+ *            Pass NULL or "" for an open AP.
  *            WPA2 mode only triggers device auto-connect if the password is
  *            correct — use this for evil-twin against a known PSK.
  */
 bool wifi_portal_start(const char* ssid, uint8_t channel,
-                       const char* password = nullptr);
+                       const char* password);
 
 /* Stop the captive portal.  Restores WiFi STA mode.  Safe if not started. */
 void wifi_portal_stop(void);
@@ -77,4 +81,6 @@ const wifi_portal_cred_t* wifi_portal_get_cred(int idx);
 /* Erase all captured credentials. */
 void wifi_portal_cred_clear(void);
 
+#ifdef __cplusplus
+}
 #endif /* __cplusplus */
