@@ -127,7 +127,9 @@ static void app_wifi_run(const bs_arch_t* arch) {
     bool caps_ok = (err == 0) &&
                    (bs_wifi_caps() & (BS_WIFI_CAP_INJECT | BS_WIFI_CAP_SNIFF)) != 0;
 
+    bool dirty = true;
     uint32_t prev_ms = arch->millis();
+    uint32_t last_anim_ms = prev_ms;
     for (;;) {
         uint32_t now = arch->millis();
         bs_ui_advance_ms(now - prev_ms);
@@ -137,13 +139,15 @@ static void app_wifi_run(const bs_arch_t* arch) {
         while ((nav = bs_nav_poll()) != BS_NAV_NONE) {
             switch (nav) {
                 case BS_NAV_UP:   case BS_NAV_PREV:
-                    cursor = (cursor + WIFI_ENTRY_COUNT - 1) % WIFI_ENTRY_COUNT; break;
+                    cursor = (cursor + WIFI_ENTRY_COUNT - 1) % WIFI_ENTRY_COUNT; dirty = true; break;
                 case BS_NAV_DOWN: case BS_NAV_NEXT:
-                    cursor = (cursor + 1) % WIFI_ENTRY_COUNT; break;
+                    cursor = (cursor + 1) % WIFI_ENTRY_COUNT; dirty = true; break;
                 case BS_NAV_SELECT:
                     if (caps_ok) {
                         bs_gfx_clear(g_bs_theme.bg);
                         k_entries[cursor].run(arch);
+                        dirty = true;
+                        last_anim_ms = arch->millis();
                     }
                     break;
                 case BS_NAV_BACK:
@@ -153,8 +157,17 @@ static void app_wifi_run(const bs_arch_t* arch) {
             }
         }
 
-        draw_menu(cursor, caps_ok);
-        arch->delay_ms(16);
+        bool anim_due = bs_ui_carousel_enabled() && (uint32_t)(now - last_anim_ms) >= 100U;
+        if (dirty || anim_due) {
+            draw_menu(cursor, caps_ok);
+            dirty = false;
+            if (anim_due) last_anim_ms = now;
+        }
+#if defined(VARIANT_TPAGER)
+        arch->delay_ms(1);
+#else
+        arch->delay_ms(2);
+#endif
     }
 }
 

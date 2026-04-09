@@ -751,7 +751,7 @@ static int cmd_ble(struct konsole* ks, int argc, char** argv) {
  * opts sdinfo              - show SD card status
  * opts sdformat [yes]      - format SD card (replaces top-level sdformat)
  *
- * Keys: text_scale  brightness  layout  palette  border  voltage
+ * Keys: text_scale  brightness  layout  palette  border  voltage  header_brand
  */
 
 /* Palette / border names come from bs_theme — declare enough for lookup */
@@ -803,10 +803,10 @@ static int cmd_opts(struct konsole* ks, int argc, char** argv) {
         float ts = bs_ui_text_scale();
         int n = snprintf(buf, sizeof buf,
             "layout=%d\ntext_scale=%.1f\nbrightness=%d\nshow_voltage=%d\n"
-            "grid_cols=%d\ngrid_rows=%d\n",
+            "header_brand=%d\ngrid_cols=%d\ngrid_rows=%d\n",
             (int)bs_menu_get_mode(), (double)ts, bs_ui_brightness(),
             (int)bs_ui_show_voltage(),
-            bs_ui_grid_max_cols(), bs_ui_grid_max_rows());
+            bs_ui_header_brand_mode(), bs_ui_grid_max_cols(), bs_ui_grid_max_rows());
         bs_fs_write_file("settings.cfg", buf, (size_t)n);
         kon_printf(ks, "Settings saved.\r\n");
         return 0;
@@ -856,6 +856,16 @@ static int cmd_opts(struct konsole* ks, int argc, char** argv) {
             kon_printf(ks, "voltage=%s\r\n", on ? "on" : "off");
             return 0;
         }
+        if (bs_stricmp(key, "header_brand") == 0) {
+            int mode = -1;
+            if      (bs_stricmp(val, "text") == 0) mode = 0;
+            else if (bs_stricmp(val, "logo") == 0) mode = 1;
+            else mode = atoi(val);
+            bs_ui_set_header_brand_mode(mode);
+            bs_menu_invalidate();
+            kon_printf(ks, "header_brand=%s\r\n", bs_ui_header_brand_mode() ? "logo" : "text");
+            return 0;
+        }
         if (bs_stricmp(key, "grid_cols") == 0) {
             bs_ui_set_grid_max_cols(atoi(val));
             kon_printf(ks, "grid_cols=%d\r\n", bs_ui_grid_max_cols());
@@ -867,7 +877,7 @@ static int cmd_opts(struct konsole* ks, int argc, char** argv) {
             return 0;
         }
         kon_printf(ks, "Unknown key '%s'.\r\n", key);
-        kon_printf(ks, "Keys: text_scale brightness layout voltage grid_cols grid_rows\r\n");
+        kon_printf(ks, "Keys: text_scale brightness layout voltage header_brand grid_cols grid_rows\r\n");
         return 1;
     }
 
@@ -887,6 +897,7 @@ static int cmd_opts(struct konsole* ks, int argc, char** argv) {
     kon_printf(ks, "  layout      = %d (%s)\r\n", lm,
                lm >= 0 && lm <= 3 ? k_layout_names[lm] : "?");
     kon_printf(ks, "  voltage     = %s\r\n", bs_ui_show_voltage() ? "on" : "off");
+    kon_printf(ks, "  header_brand= %s\r\n", bs_ui_header_brand_mode() ? "logo" : "text");
     kon_printf(ks, "  grid_cols   = %d\r\n", bs_ui_grid_max_cols());
     kon_printf(ks, "  grid_rows   = %d\r\n", bs_ui_grid_max_rows());
     kon_printf(ks, "  firmware    = " BS_FW_NAME " v" BS_VERSION "\r\n");

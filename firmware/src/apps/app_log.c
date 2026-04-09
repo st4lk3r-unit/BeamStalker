@@ -144,48 +144,61 @@ static void app_log_run(const bs_arch_t* arch) {
     if (scroll < 0) scroll = 0;
 
     bool dirty = true;
+    uint32_t prev_ms = arch->millis();
+    uint32_t last_anim_ms = prev_ms;
 
     while (true) {
+        uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
+
         count = bs_log_count();
 
-        if (dirty) {
+        bool anim_due = bs_ui_carousel_enabled() && (uint32_t)(now - last_anim_ms) >= 100U;
+        if (dirty || anim_due) {
             draw_log_view(scroll);
             bs_gfx_present();
             dirty = false;
+            if (anim_due) last_anim_ms = now;
         }
 
-        arch->delay_ms(10);
-        bs_nav_id_t nav = bs_nav_poll();
+        bs_nav_id_t nav;
+        while ((nav = bs_nav_poll()) != BS_NAV_NONE) {
+            switch (nav) {
+                case BS_NAV_BACK:
+                    return;
 
-        switch (nav) {
-            case BS_NAV_BACK:
-                return;
+                case BS_NAV_UP:
+                case BS_NAV_PREV:
+                    if (scroll > 0) { scroll--; dirty = true; }
+                    break;
 
-            case BS_NAV_UP:
-            case BS_NAV_PREV:
-                if (scroll > 0) { scroll--; dirty = true; }
-                break;
+                case BS_NAV_DOWN:
+                case BS_NAV_NEXT:
+                    if (scroll < count - 1) { scroll++; dirty = true; }
+                    break;
 
-            case BS_NAV_DOWN:
-            case BS_NAV_NEXT:
-                if (scroll < count - 1) { scroll++; dirty = true; }
-                break;
+                case BS_NAV_LEFT:   /* page up */
+                    scroll -= visible;
+                    if (scroll < 0) scroll = 0;
+                    dirty = true;
+                    break;
 
-            case BS_NAV_LEFT:   /* page up */
-                scroll -= visible;
-                if (scroll < 0) scroll = 0;
-                dirty = true;
-                break;
+                case BS_NAV_RIGHT:  /* page down */
+                    scroll += visible;
+                    if (scroll >= count) scroll = count > 0 ? count - 1 : 0;
+                    dirty = true;
+                    break;
 
-            case BS_NAV_RIGHT:  /* page down */
-                scroll += visible;
-                if (scroll >= count) scroll = count > 0 ? count - 1 : 0;
-                dirty = true;
-                break;
-
-            default:
-                break;
+                default:
+                    break;
+            }
         }
+#if defined(VARIANT_TPAGER)
+        arch->delay_ms(1);
+#else
+        arch->delay_ms(2);
+#endif
     }
 }
 

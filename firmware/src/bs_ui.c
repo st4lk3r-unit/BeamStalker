@@ -10,19 +10,30 @@
 #include "bs/bs_gfx.h"
 #include "bs/bs_fs.h"
 #include "bs/bs_hw.h"
+#include "bs/bs_assets.h"
+#include "beamstalker.h"
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 
 static float    s_text_scale   = 1.0f;
 static uint32_t s_ui_ms        = 0;   /* carousel time accumulator (ms) */
 static int      s_brightness   = 100;
 static bool     s_show_voltage = false;
+static int      s_header_brand_mode = 0; /* 0=text, 1=logo */
 static int      s_grid_max_cols = 0;  /* 0=auto */
 static int      s_grid_max_rows = 0;  /* 0=auto */
 static bool     s_carousel     = false; /* off during boot; on after settings load */
 
 /* ---- Layout helpers --------------------------------------------------- */
+
+
+static bool bs_ui_use_header_logo(const char* title) {
+    if (bs_ui_header_brand_mode() == 0) return false;
+    if (title == NULL || *title == '\0') return true;
+    return strcmp(title, BS_FW_NAME) == 0 || strcmp(title, "BeamStalker") == 0;
+}
 
 int bs_ui_header_h(void) {
     return bs_gfx_text_h(s_text_scale) + 8;
@@ -34,9 +45,33 @@ void bs_ui_draw_header(const char* title) {
     float ts = s_text_scale;
     int ty   = (hh - bs_gfx_text_h(ts)) / 2;
     bs_gfx_fill_rect(0, 0, sw, hh, g_bs_theme.bg);
-    /* Title: carousel if it overflows the available width */
+
+    /* Battery % — reserve width up-front so the brand area knows its cap. */
     int bat_reserve = bs_gfx_text_w("100%", ts) + 8;
-    bs_ui_draw_text_box(8, ty, sw - bat_reserve - 16, title, g_bs_theme.dim, ts, true);
+    int title_x     = 8;
+    int title_w     = sw - bat_reserve - 16;
+    if (title_w < 8) title_w = 8;
+
+    if (bs_ui_use_header_logo(title)) {
+        /* Draw the real skull bitmap (120x120), scaled down to fit the header.
+         * The previous code path used a 128x64 placeholder asset that is all zeros,
+         * which is why the "Logo" setting appeared to do nothing. */
+        int max_w = title_w;
+        int max_h = hh - 4;
+        if (max_w > 8 && max_h > 4) {
+            int step_w = (120 + max_w - 1) / max_w;
+            int step_h = (120 + max_h - 1) / max_h;
+            int step   = step_w > step_h ? step_w : step_h;
+            if (step < 1) step = 1;
+            int out_h = (120 + step - 1) / step;
+            int ox = title_x;
+            int oy = (hh - out_h) / 2;
+            bs_gfx_bitmap_1bpp(ox, oy, 120, 120, bs_skull_120, g_bs_theme.dim, 1, step);
+        }
+    } else {
+        /* Title: carousel if it overflows the available width */
+        bs_ui_draw_text_box(title_x, ty, title_w, title, g_bs_theme.dim, ts, true);
+    }
 
     /* Battery % — rate-limited read (every ~150 calls, same cadence as menu) */
     static int  s_bat_pct   = -1;
@@ -139,8 +174,8 @@ void bs_ui_draw_text_box(int x, int y, int w,
      *   PAUSE_MS   - hold at each end before sliding
      *   PX_PER_SEC - scrolling speed in pixels per second
      */
-    #define CAR_PAUSE_MS   1500   /* 1.5 s pause at each end */
-    #define CAR_PX_PER_SEC   60   /* 60 px/s slide speed     */
+    #define CAR_PAUSE_MS    700   /* shorter pause at each end */
+    #define CAR_PX_PER_SEC   80   /* slightly faster slide    */
 
     /* slide_ms: time to traverse the full scroll range */
     int slide_ms = (scroll_range * 1000) / CAR_PX_PER_SEC;
@@ -294,6 +329,11 @@ int bs_ui_draw_kv_row(int y, const char* key, const char* val,
 bool bs_ui_show_voltage(void)         { return s_show_voltage; }
 void bs_ui_set_show_voltage(bool show) { s_show_voltage = show; }
 
+/* ---- Header brand mode ----------------------------------------------- */
+
+int  bs_ui_header_brand_mode(void) { return s_header_brand_mode; }
+void bs_ui_set_header_brand_mode(int mode) { s_header_brand_mode = (mode != 0) ? 1 : 0; }
+
 /* ---- Grid max columns ------------------------------------------------- */
 
 int  bs_ui_grid_max_cols(void)    { return s_grid_max_cols; }
@@ -348,6 +388,7 @@ void bs_ui_load_settings(void) {
         if (sscanf(line, "brightness=%d",  &val) == 1) bs_ui_set_brightness(val);
         if (sscanf(line, "layout=%d",      &val) == 1) bs_menu_set_mode((bs_menu_mode_t)val);
         if (sscanf(line, "show_voltage=%d",&val) == 1) bs_ui_set_show_voltage(val != 0);
+        if (sscanf(line, "header_brand=%d",&val) == 1) bs_ui_set_header_brand_mode(val);
         if (sscanf(line, "grid_cols=%d",  &val) == 1) bs_ui_set_grid_max_cols(val);
         if (sscanf(line, "grid_rows=%d",  &val) == 1) bs_ui_set_grid_max_rows(val);
         if (sscanf(line, "carousel=%d",   &val) == 1) {

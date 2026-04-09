@@ -185,6 +185,34 @@ static void stop_probe_monitor(void) {
     esp_wifi_set_promiscuous(false);
 }
 
+static void draw_sniff_status_row(int y, float ts) {
+    int sw       = bs_gfx_width();
+    int rh       = bs_ui_row_h(ts);
+    int pad_y    = (rh - bs_gfx_text_h(ts)) / 2;
+    int total_w  = sw - 16;
+    int gap      = 6;
+    int label_w  = (total_w * 60) / 100;   /* deliberately capped so long text can marquee */
+    int value_w  = total_w - label_w - gap;
+    if (label_w < 96) label_w = 96;
+    if (value_w < 28) value_w = 28;
+    if (label_w + value_w + gap > total_w) label_w = total_w - value_w - gap;
+
+    int lx = 8;
+    int vx = lx + label_w + gap;
+
+    bs_gfx_fill_rect(lx - 2, y - 1, label_w + 4, rh, g_bs_theme.dim);
+    bs_gfx_fill_rect(vx - 2, y - 1, value_w + 4, rh, g_bs_theme.dim);
+
+    char value_buf[16];
+    snprintf(value_buf, sizeof(value_buf), "%d", k_sniff_channels[s_ch_idx]);
+    int value_tw = bs_gfx_text_w(value_buf, ts);
+    int value_tx = vx + (value_w - value_tw) / 2;
+    if (value_tx < vx) value_tx = vx;
+
+    bs_ui_draw_text_box(lx, y + pad_y, label_w, "Sniffing on channel", g_bs_theme.secondary, ts, true);
+    bs_gfx_text(value_tx, y + pad_y, value_buf, g_bs_theme.accent, ts);
+}
+
 /* ── Draw ────────────────────────────────────────────────────────────────── */
 
 static void draw_sniff(void) {
@@ -198,23 +226,21 @@ static void draw_sniff(void) {
     bs_gfx_clear(g_bs_theme.bg);
     bs_ui_draw_header("Karma");
 
-    char buf[64];
-    snprintf(buf, sizeof(buf), "Sniffing probes on ch%d...",
-             k_sniff_channels[s_ch_idx]);
-    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts, false);
-    y += lh;
+    draw_sniff_status_row(y, ts);
+    y += bs_ui_row_h(ts);
 
+    char buf[64];
     int count = __atomic_load_n(&s_ssid_count, __ATOMIC_ACQUIRE);
     snprintf(buf, sizeof(buf), "Collected: %d SSID%s",
              count, count == 1 ? "" : "s");
-    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts2, false);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts2, true);
     y += lh2 + 6;
 
     int show = count < 5 ? count : 5;
     for (int i = count - show; i < count; i++) {
         if (y + lh2 > bs_gfx_height() - bs_gfx_text_h(ts2) - 6) break;
         bs_color_t c = (i == count - 1) ? g_bs_theme.accent : g_bs_theme.dim;
-        bs_ui_draw_text_box(12, y, sw - 20, s_ssids[i], c, ts2, false);
+        bs_ui_draw_text_box(12, y, sw - 20, s_ssids[i], c, ts2, true);
         y += lh2;
     }
 
@@ -281,13 +307,13 @@ static void draw_running(void) {
     } else {
         snprintf(buf, sizeof(buf), "AP: %.40s  ch%d", s_target_ssid, s_ap_ch);
     }
-    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, false);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
     wifi_sta_list_t sta = {};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", sta.num);
-    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, false);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
     y += lh2 + 4;
 
     bs_gfx_fill_rect(4, y, sw - 8, 1, g_bs_theme.dim);
@@ -298,7 +324,7 @@ static void draw_running(void) {
         bs_color_t c = (i == s_log_count - 1) ? g_bs_theme.accent : g_bs_theme.dim;
         int line_y = y + i * lh2;
         if (line_y + lh2 > bs_gfx_height() - bs_gfx_text_h(ts2) - 6) break;
-        bs_ui_draw_text_box(8, line_y, sw - 16, s_log[idx], c, ts2, false);
+        bs_ui_draw_text_box(8, line_y, sw - 16, s_log[idx], c, ts2, true);
     }
 
     bs_ui_draw_hint("BACK=stop");
@@ -459,18 +485,25 @@ extern "C" void wifi_karma_run(const bs_arch_t* arch) {
             case KA_SELECT:  draw_select();  break;
             case KA_RUNNING: draw_running(); break;
             }
+            last_refresh = now;
         }
 
-        if (s_phase == KA_SNIFF && (now - last_refresh) >= 500) {
-            last_refresh = now;
-            draw_sniff();
+        uint32_t anim_ms = 0;
+        switch (s_phase) {
+            case KA_SNIFF:   anim_ms = bs_ui_carousel_enabled() ? 40U : 120U; break;
+            case KA_SELECT:  anim_ms = bs_ui_carousel_enabled() ? 40U : 80U;  break;
+            case KA_RUNNING: anim_ms = bs_ui_carousel_enabled() ? 40U : (uint32_t)KA_REFRESH_MS; break;
         }
-        if (s_phase == KA_RUNNING && (now - last_refresh) >= (uint32_t)KA_REFRESH_MS) {
+        if ((uint32_t)(now - last_refresh) >= anim_ms) {
             last_refresh = now;
-            draw_running();
+            switch (s_phase) {
+                case KA_SNIFF:   draw_sniff();   break;
+                case KA_SELECT:  draw_select();  break;
+                case KA_RUNNING: draw_running(); break;
+            }
         }
 
-        arch->delay_ms(s_phase == KA_RUNNING ? 10 : 5);
+        arch->delay_ms(s_phase == KA_RUNNING ? 8 : 2);
     }
 }
 

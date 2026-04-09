@@ -48,6 +48,9 @@ static const char* const k_voltage_names[] = {"Off", "On"};
 static const char* const k_carousel_names[] = {"Off", "On"};
 #define N_CAROUSEL 2
 
+static const char* const k_header_brand_names[] = {"Text", "Logo"};
+#define N_HEADER_BRAND 2
+
 /* ── Pages ───────────────────────────────────────────────────────────────── */
 
 typedef enum {
@@ -58,7 +61,7 @@ typedef enum {
 } sett_page_t;
 
 #define N_MAIN         3
-#define N_DISPLAY      6
+#define N_DISPLAY      7
 #define N_APPEARANCE   2
 #define N_SYSTEM       4   /* Voltage, SD info, Format SD, Firmware */
 
@@ -78,6 +81,7 @@ static int s_text_scale_idx;
 static int s_bright_idx;
 static int s_voltage_idx;
 static int s_carousel_idx;
+static int s_header_brand_idx;
 
 /* ── Persist ─────────────────────────────────────────────────────────────── */
 
@@ -85,12 +89,12 @@ static void settings_save(void) {
     char buf[256];
     int n = snprintf(buf, sizeof buf,
         "layout=%d\ngrid_cols=%d\ngrid_rows=%d\npalette=%d\nborder=%d\n"
-        "text_scale=%.1f\nbrightness=%d\nshow_voltage=%d\ncarousel=%d\n",
+        "text_scale=%.1f\nbrightness=%d\nshow_voltage=%d\ncarousel=%d\nheader_brand=%d\n",
         s_layout_idx, k_grid_vals[s_grid_cols_idx],
         k_grid_rows_vals[s_grid_rows_idx],
         s_palette_idx, s_border_idx,
         (double)k_scale_vals[s_text_scale_idx],
-        k_bright_vals[s_bright_idx], s_voltage_idx, s_carousel_idx);
+        k_bright_vals[s_bright_idx], s_voltage_idx, s_carousel_idx, s_header_brand_idx);
     bs_fs_write_file("settings.cfg", buf, (size_t)n);
 }
 
@@ -127,6 +131,8 @@ static void settings_load(void) {
         }
         if (sscanf(line, "show_voltage=%d",&val) == 1)
             s_voltage_idx = (val != 0) ? 1 : 0;
+        if (sscanf(line, "header_brand=%d",&val) == 1)
+            s_header_brand_idx = (val != 0) ? 1 : 0;
         *nl = save;
         line = nl + (*nl ? 1 : 0);
     }
@@ -134,6 +140,7 @@ static void settings_load(void) {
     if (s_border_idx  < 0 || s_border_idx  >= BS_BORDER_STYLE_COUNT) s_border_idx    = 0;
     if (s_grid_cols_idx < 0 || s_grid_cols_idx >= N_GRID)            s_grid_cols_idx = 0;
     if (s_grid_rows_idx < 0 || s_grid_rows_idx >= N_GRID_ROWS)       s_grid_rows_idx = 0;
+    if (s_header_brand_idx < 0 || s_header_brand_idx >= N_HEADER_BRAND) s_header_brand_idx = 0;
 }
 
 /* ── Apply helpers ───────────────────────────────────────────────────────── */
@@ -146,6 +153,7 @@ static void apply_text_scale(void) { bs_ui_set_text_scale((float)k_scale_vals[s_
 static void apply_brightness(void) { bs_ui_set_brightness(k_bright_vals[s_bright_idx]); }
 static void apply_voltage(void)    { bs_ui_set_show_voltage(s_voltage_idx != 0); }
 static void apply_carousel(void)   { bs_ui_set_carousel(s_carousel_idx != 0); }
+static void apply_header_brand(void){ bs_ui_set_header_brand_mode(s_header_brand_idx != 0); bs_menu_invalidate(); }
 
 /* ── Shared row draw ─────────────────────────────────────────────────────── */
 
@@ -264,6 +272,7 @@ static void draw_display(void) {
         { "Text Scale", k_scale_names[s_text_scale_idx]    },
         { "Brightness", k_bright_names[s_bright_idx]       },
         { "Carousel",   k_carousel_names[s_carousel_idx]   },
+        { "Header",     k_header_brand_names[s_header_brand_idx] },
     };
 
     bs_gfx_clear(g_bs_theme.bg);
@@ -356,6 +365,7 @@ static void settings_run(const bs_arch_t* arch) {
     s_bright_idx     = 3;
     s_voltage_idx    = bs_ui_show_voltage() ? 1 : 0;
     s_carousel_idx   = bs_ui_carousel_enabled() ? 1 : 0;
+    s_header_brand_idx = bs_ui_header_brand_mode() ? 1 : 0;
 
     { int cur = bs_ui_grid_max_cols();
       for (int i = 0; i < N_GRID; i++)
@@ -385,128 +395,145 @@ static void settings_run(const bs_arch_t* arch) {
     settings_load();
 
     uint32_t prev_ms = arch->millis();
+    uint32_t last_anim_ms = prev_ms;
+    bool dirty = true;
     while (true) {
         uint32_t now = arch->millis();
         bs_ui_advance_ms(now - prev_ms);
         prev_ms = now;
 
-        switch (s_page) {
-            case SETT_MAIN:       draw_main();       break;
-            case SETT_DISPLAY:    draw_display();    break;
-            case SETT_APPEARANCE: draw_appearance(); break;
-            case SETT_SYSTEM:     draw_system();     break;
+        bool anim_due = bs_ui_carousel_enabled() && (uint32_t)(now - last_anim_ms) >= 100U;
+        if (dirty || anim_due) {
+            switch (s_page) {
+                case SETT_MAIN:       draw_main();       break;
+                case SETT_DISPLAY:    draw_display();    break;
+                case SETT_APPEARANCE: draw_appearance(); break;
+                case SETT_SYSTEM:     draw_system();     break;
+            }
+            bs_debug_frame();
+            bs_gfx_present();
+            dirty = false;
+            if (anim_due) last_anim_ms = now;
         }
-        bs_debug_frame();
-        bs_gfx_present();
 
-        bs_nav_id_t nav = bs_nav_poll();
-        if (nav == BS_NAV_NONE) { arch->delay_ms(16); continue; }
+        bs_nav_id_t nav;
+        while ((nav = bs_nav_poll()) != BS_NAV_NONE) {
+            if (s_page == SETT_MAIN) {
+                switch (nav) {
+                    case BS_NAV_BACK: return;
+                    case BS_NAV_UP:   case BS_NAV_PREV:
+                        s_cursor[SETT_MAIN] = (s_cursor[SETT_MAIN] + N_MAIN - 1) % N_MAIN; dirty = true; break;
+                    case BS_NAV_DOWN: case BS_NAV_NEXT:
+                        s_cursor[SETT_MAIN] = (s_cursor[SETT_MAIN] + 1) % N_MAIN; dirty = true; break;
+                    case BS_NAV_SELECT:
+                        s_page = (sett_page_t)(s_cursor[SETT_MAIN] + 1); dirty = true; break;
+                    default: break;
+                }
+                continue;
+            }
 
-        if (s_page == SETT_MAIN) {
-            switch (nav) {
-                case BS_NAV_BACK: return;
-                case BS_NAV_UP:   case BS_NAV_PREV:
-                    s_cursor[SETT_MAIN] = (s_cursor[SETT_MAIN] + N_MAIN - 1) % N_MAIN; break;
-                case BS_NAV_DOWN: case BS_NAV_NEXT:
-                    s_cursor[SETT_MAIN] = (s_cursor[SETT_MAIN] + 1) % N_MAIN; break;
-                case BS_NAV_SELECT:
-                    s_page = (sett_page_t)(s_cursor[SETT_MAIN] + 1); break;
+            /* ── Sub-menu navigation ── */
+            int  n   = 0;
+            int* cur = &s_cursor[s_page];
+            switch (s_page) {
+                case SETT_DISPLAY:    n = N_DISPLAY;    break;
+                case SETT_APPEARANCE: n = N_APPEARANCE; break;
+                case SETT_SYSTEM:     n = N_SYSTEM;     break;
                 default: break;
             }
-            arch->delay_ms(16);
-            continue;
-        }
 
-        /* ── Sub-menu navigation ── */
-        int  n   = 0;
-        int* cur = &s_cursor[s_page];
-        switch (s_page) {
-            case SETT_DISPLAY:    n = N_DISPLAY;    break;
-            case SETT_APPEARANCE: n = N_APPEARANCE; break;
-            case SETT_SYSTEM:     n = N_SYSTEM;     break;
-            default: break;
-        }
-
-        switch (nav) {
-            case BS_NAV_BACK:
-                if (s_format_confirm) {
+            switch (nav) {
+                case BS_NAV_BACK:
+                    if (s_format_confirm) {
+                        s_format_confirm = false;
+                    } else {
+                        s_page = SETT_MAIN;
+                    }
+                    dirty = true;
+                    break;
+                case BS_NAV_UP:   case BS_NAV_PREV:
+                    *cur = (*cur + n - 1) % n;
                     s_format_confirm = false;
-                } else {
-                    s_page = SETT_MAIN;
-                }
-                break;
-            case BS_NAV_UP:   case BS_NAV_PREV:
-                *cur = (*cur + n - 1) % n;
-                s_format_confirm = false;
-                sett_clamp_scroll(s_page, bs_ui_text_scale());
-                break;
-            case BS_NAV_DOWN: case BS_NAV_NEXT:
-                *cur = (*cur + 1) % n;
-                s_format_confirm = false;
-                sett_clamp_scroll(s_page, bs_ui_text_scale());
-                break;
-            case BS_NAV_LEFT:
-                if (s_page == SETT_DISPLAY) {
-                    switch (*cur) {
-                        case 0: CYCLE_LEFT(s_layout_idx,     N_LAYOUTS);   apply_layout();     break;
-                        case 1: CYCLE_LEFT(s_grid_cols_idx,  N_GRID);      apply_grid_cols();  break;
-                        case 2: CYCLE_LEFT(s_grid_rows_idx,  N_GRID_ROWS); apply_grid_rows();  break;
-                        case 3: CYCLE_LEFT(s_text_scale_idx, N_SCALES);    apply_text_scale(); break;
-                        case 4: CYCLE_LEFT(s_bright_idx,     N_BRIGHT);    apply_brightness(); break;
-                        case 5: CYCLE_LEFT(s_carousel_idx,   N_CAROUSEL);  apply_carousel();   break;
+                    sett_clamp_scroll(s_page, bs_ui_text_scale());
+                    dirty = true;
+                    break;
+                case BS_NAV_DOWN: case BS_NAV_NEXT:
+                    *cur = (*cur + 1) % n;
+                    s_format_confirm = false;
+                    sett_clamp_scroll(s_page, bs_ui_text_scale());
+                    dirty = true;
+                    break;
+                case BS_NAV_LEFT:
+                    if (s_page == SETT_DISPLAY) {
+                        switch (*cur) {
+                            case 0: CYCLE_LEFT(s_layout_idx,     N_LAYOUTS);   apply_layout();     break;
+                            case 1: CYCLE_LEFT(s_grid_cols_idx,  N_GRID);      apply_grid_cols();  break;
+                            case 2: CYCLE_LEFT(s_grid_rows_idx,  N_GRID_ROWS); apply_grid_rows();  break;
+                            case 3: CYCLE_LEFT(s_text_scale_idx, N_SCALES);    apply_text_scale(); break;
+                            case 4: CYCLE_LEFT(s_bright_idx,     N_BRIGHT);    apply_brightness(); break;
+                            case 5: CYCLE_LEFT(s_carousel_idx,   N_CAROUSEL);    apply_carousel();     break;
+                            case 6: CYCLE_LEFT(s_header_brand_idx,N_HEADER_BRAND); apply_header_brand(); break;
+                        }
+                        settings_save();
+                    } else if (s_page == SETT_APPEARANCE) {
+                        switch (*cur) {
+                            case 0: CYCLE_LEFT(s_palette_idx, BS_PALETTE_COUNT);      apply_appearance(); break;
+                            case 1: CYCLE_LEFT(s_border_idx,  BS_BORDER_STYLE_COUNT); apply_appearance(); break;
+                        }
+                        settings_save();
+                    } else if (s_page == SETT_SYSTEM) {
+                        if (*cur == 0) { CYCLE_LEFT(s_voltage_idx, N_VOLTAGE); apply_voltage(); settings_save(); }
                     }
-                    settings_save();
-                } else if (s_page == SETT_APPEARANCE) {
-                    switch (*cur) {
-                        case 0: CYCLE_LEFT(s_palette_idx, BS_PALETTE_COUNT);      apply_appearance(); break;
-                        case 1: CYCLE_LEFT(s_border_idx,  BS_BORDER_STYLE_COUNT); apply_appearance(); break;
+                    dirty = true;
+                    break;
+                case BS_NAV_RIGHT:
+                case BS_NAV_SELECT:
+                    if (s_page == SETT_DISPLAY) {
+                        switch (*cur) {
+                            case 0: CYCLE_RIGHT(s_layout_idx,     N_LAYOUTS);   apply_layout();     break;
+                            case 1: CYCLE_RIGHT(s_grid_cols_idx,  N_GRID);      apply_grid_cols();  break;
+                            case 2: CYCLE_RIGHT(s_grid_rows_idx,  N_GRID_ROWS); apply_grid_rows();  break;
+                            case 3: CYCLE_RIGHT(s_text_scale_idx, N_SCALES);    apply_text_scale(); break;
+                            case 4: CYCLE_RIGHT(s_bright_idx,     N_BRIGHT);    apply_brightness(); break;
+                            case 5: CYCLE_RIGHT(s_carousel_idx,   N_CAROUSEL);    apply_carousel();     break;
+                            case 6: CYCLE_RIGHT(s_header_brand_idx,N_HEADER_BRAND); apply_header_brand(); break;
+                        }
+                        settings_save();
+                    } else if (s_page == SETT_APPEARANCE) {
+                        switch (*cur) {
+                            case 0: CYCLE_RIGHT(s_palette_idx, BS_PALETTE_COUNT);      apply_appearance(); break;
+                            case 1: CYCLE_RIGHT(s_border_idx,  BS_BORDER_STYLE_COUNT); apply_appearance(); break;
+                        }
+                        settings_save();
+                    } else if (s_page == SETT_SYSTEM) {
+                        switch (*cur) {
+                            case 0:
+                                CYCLE_RIGHT(s_voltage_idx, N_VOLTAGE);
+                                apply_voltage();
+                                settings_save();
+                                break;
+                            case 2: /* Format SD */
+                                if (!s_format_confirm) {
+                                    s_format_confirm = true;
+                                } else {
+                                    s_format_confirm = false;
+                                    bs_fs_format();
+                                    bs_log_flush_sd();
+                                }
+                                break;
+                            default: break;
+                        }
                     }
-                    settings_save();
-                } else if (s_page == SETT_SYSTEM) {
-                    if (*cur == 0) { CYCLE_LEFT(s_voltage_idx, N_VOLTAGE); apply_voltage(); settings_save(); }
-                }
-                break;
-            case BS_NAV_RIGHT:
-            case BS_NAV_SELECT:
-                if (s_page == SETT_DISPLAY) {
-                    switch (*cur) {
-                        case 0: CYCLE_RIGHT(s_layout_idx,     N_LAYOUTS);   apply_layout();     break;
-                        case 1: CYCLE_RIGHT(s_grid_cols_idx,  N_GRID);      apply_grid_cols();  break;
-                        case 2: CYCLE_RIGHT(s_grid_rows_idx,  N_GRID_ROWS); apply_grid_rows();  break;
-                        case 3: CYCLE_RIGHT(s_text_scale_idx, N_SCALES);    apply_text_scale(); break;
-                        case 4: CYCLE_RIGHT(s_bright_idx,     N_BRIGHT);    apply_brightness(); break;
-                        case 5: CYCLE_RIGHT(s_carousel_idx,   N_CAROUSEL);  apply_carousel();   break;
-                    }
-                    settings_save();
-                } else if (s_page == SETT_APPEARANCE) {
-                    switch (*cur) {
-                        case 0: CYCLE_RIGHT(s_palette_idx, BS_PALETTE_COUNT);      apply_appearance(); break;
-                        case 1: CYCLE_RIGHT(s_border_idx,  BS_BORDER_STYLE_COUNT); apply_appearance(); break;
-                    }
-                    settings_save();
-                } else if (s_page == SETT_SYSTEM) {
-                    switch (*cur) {
-                        case 0:
-                            CYCLE_RIGHT(s_voltage_idx, N_VOLTAGE);
-                            apply_voltage();
-                            settings_save();
-                            break;
-                        case 2: /* Format SD */
-                            if (!s_format_confirm) {
-                                s_format_confirm = true;
-                            } else {
-                                s_format_confirm = false;
-                                bs_fs_format();
-                                bs_log_flush_sd();
-                            }
-                            break;
-                        default: break;
-                    }
-                }
-                break;
-            default: break;
+                    dirty = true;
+                    break;
+                default: break;
+            }
         }
-        arch->delay_ms(16);
+#if defined(VARIANT_TPAGER)
+        arch->delay_ms(1);
+#else
+        arch->delay_ms(2);
+#endif
     }
 }
 

@@ -81,6 +81,10 @@ void bs_ui_set_brightness(int pct);
 bool bs_ui_show_voltage(void);
 void bs_ui_set_show_voltage(bool show);
 
+/* Header brand mode (0=text title, 1=bitmap logo) */
+int  bs_ui_header_brand_mode(void);
+void bs_ui_set_header_brand_mode(int mode);
+
 /* Grid max columns (0=auto/ceil(sqrt(n)), 2/3/4=hard limit) */
 int  bs_ui_grid_max_cols(void);
 void bs_ui_set_grid_max_cols(int n);

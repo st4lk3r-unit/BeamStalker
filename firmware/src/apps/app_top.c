@@ -285,20 +285,23 @@ static void top_run(const bs_arch_t* arch) {
     s_info_cursor   = 0;
     s_sysinfo_built = false;
 
+    bool dirty = true;
     uint32_t prev_dyn_ms = arch->millis();
     uint32_t prev_ms     = prev_dyn_ms;
+    uint32_t last_anim_ms = prev_dyn_ms;
 
     for (;;) {
         uint32_t now_ms = arch->millis();
         bs_ui_advance_ms(now_ms - prev_ms);
         prev_ms = now_ms;
 
-        if (!s_sysinfo_built) build_sysinfo();
+        if (!s_sysinfo_built) { build_sysinfo(); dirty = true; }
 
         /* Refresh dynamic rows every 2 s */
         if (now_ms - prev_dyn_ms >= 2000) {
             prev_dyn_ms = now_ms;
             refresh_sysinfo_dyn();
+            dirty = true;
         }
 
         /* Drain all pending nav events */
@@ -311,11 +314,11 @@ static void top_run(const bs_arch_t* arch) {
                     break;
                 case BS_NAV_UP:
                 case BS_NAV_PREV:
-                    if (s_info_cursor > 0) s_info_cursor--;
+                    if (s_info_cursor > 0) { s_info_cursor--; dirty = true; }
                     break;
                 case BS_NAV_DOWN:
                 case BS_NAV_NEXT:
-                    if (s_info_cursor < s_info_nrows - 1) s_info_cursor++;
+                    if (s_info_cursor < s_info_nrows - 1) { s_info_cursor++; dirty = true; }
                     break;
                 default:
                     break;
@@ -323,10 +326,19 @@ static void top_run(const bs_arch_t* arch) {
         }
         if (quit) return;
 
-        draw_sysinfo(sw, sh, now_ms);
-        bs_debug_frame();
-        bs_gfx_present();
-        arch->delay_ms(16);
+        bool anim_due = bs_ui_carousel_enabled() && (uint32_t)(now_ms - last_anim_ms) >= 100U;
+        if (dirty || anim_due) {
+            draw_sysinfo(sw, sh, now_ms);
+            bs_debug_frame();
+            bs_gfx_present();
+            dirty = false;
+            if (anim_due) last_anim_ms = now_ms;
+        }
+#if defined(VARIANT_TPAGER)
+        arch->delay_ms(1);
+#else
+        arch->delay_ms(2);
+#endif
     }
 }
 

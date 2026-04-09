@@ -278,7 +278,7 @@ static void draw_select(void) {
                  s_aps[idx].channel, s_aps[idx].rssi);
 
         bs_ui_draw_text_box(8, y,                          sw - 16, ssid, nc, ts,  sel);
-        bs_ui_draw_text_box(8, y + bs_gfx_text_h(ts) + 1, sw - 16, info, dc, ts2, false);
+        bs_ui_draw_text_box(8, y + bs_gfx_text_h(ts) + 1, sw - 16, info, dc, ts2, sel);
     }
 
     bs_ui_draw_hint("SELECT=clone  BACK=rescan");
@@ -297,12 +297,12 @@ static void draw_sniff(uint32_t elapsed) {
     bs_ui_draw_header("Honeypot / Scanning Clients");
 
     const char* ssid = s_target_ssid[0] ? s_target_ssid : "(hidden)";
-    bs_ui_draw_text_box(8, y, sw - 16, ssid, g_bs_theme.accent, ts, false);
+    bs_ui_draw_text_box(8, y, sw - 16, ssid, g_bs_theme.accent, ts, true);
     y += lh;
 
     char buf[48];
     snprintf(buf, sizeof(buf), "ch%d  — listening for clients", s_target_ch);
-    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, false);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
     y += lh2 + 6;
 
     /* Progress bar */
@@ -338,20 +338,20 @@ static void draw_running(uint32_t now) {
     const char* mode_str = (s_attack == HP_BROADCAST) ? "BCAST" : "TGTD";
     snprintf(buf, sizeof(buf), "AP: %.30s  ch%d  [%s]",
              s_target_ssid[0] ? s_target_ssid : "(hidden)", s_hp_ch, mode_str);
-    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, false);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
     wifi_sta_list_t sta = {};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", sta.num);
-    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, false);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
     y += lh2;
 
     uint32_t since_lure = now - s_lure_last_ms;
     uint32_t next_in    = (since_lure < (uint32_t)HP_LURE_PERIOD_MS)
                           ? (HP_LURE_PERIOD_MS - since_lure) / 1000 : 0;
     snprintf(buf, sizeof(buf), "Next lure: %lus", (unsigned long)next_in);
-    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.dim, ts2, false);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.dim, ts2, true);
     y += lh2 + 4;
 
     bs_gfx_fill_rect(4, y, sw - 8, 1, g_bs_theme.dim);
@@ -362,7 +362,7 @@ static void draw_running(uint32_t now) {
         bs_color_t c = (i == s_log_count - 1) ? g_bs_theme.accent : g_bs_theme.dim;
         int line_y = y + i * lh2;
         if (line_y + lh2 > bs_gfx_height() - bs_gfx_text_h(ts2) - 6) break;
-        bs_ui_draw_text_box(8, line_y, sw - 16, s_log[idx], c, ts2, false);
+        bs_ui_draw_text_box(8, line_y, sw - 16, s_log[idx], c, ts2, true);
     }
 
     bs_ui_draw_hint("BACK=stop");
@@ -383,6 +383,7 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
     s_log_count    = 0;
 
     bool dirty     = true;
+    uint32_t last_anim_ms = 0;
     bool scanning  = false;
     uint32_t last_refresh = 0;
 
@@ -405,8 +406,10 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
                            sta.sta[i].mac[1],
                            sta.sta[i].mac[2]);
                 }
+                dirty = true;
             } else if (sta.num < s_prev_clients) {
                 hp_log("Client disconnected");
+                dirty = true;
             }
             s_prev_clients = sta.num;
 
@@ -563,8 +566,12 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
             }
         }
 
+        bool anim_due = (s_phase == HP_SELECT || s_phase == HP_SNIFF || s_phase == HP_RUNNING)
+                     && bs_ui_carousel_enabled()
+                     && (uint32_t)(now - last_anim_ms) >= 80U;
+
         /* ── Draw ───────────────────────────────────────────────────────── */
-        if (dirty) {
+        if (dirty || anim_due) {
             dirty = false;
             uint32_t elapsed = (s_phase == HP_SNIFF && s_sniff_start_ms)
                                ? (now - s_sniff_start_ms) : 0;
@@ -575,14 +582,19 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
             case HP_SNIFF:   draw_sniff(elapsed);  break;
             case HP_RUNNING: draw_running(now);    break;
             }
+            if (anim_due) last_anim_ms = now;
         }
 
         if (s_phase == HP_RUNNING && (now - last_refresh) >= (uint32_t)HP_REFRESH_MS) {
             last_refresh = now;
-            draw_running(now);
+            dirty = true;
         }
 
+#if defined(VARIANT_TPAGER)
+        arch->delay_ms(s_phase == HP_RUNNING ? 2 : 1);
+#else
         arch->delay_ms(s_phase == HP_RUNNING ? 10 : 5);
+#endif
     }
 }
 

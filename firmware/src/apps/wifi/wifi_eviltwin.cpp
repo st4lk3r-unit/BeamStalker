@@ -51,6 +51,7 @@ extern "C" {
 #define ET_LOG_LINES       5
 #define ET_LOG_LEN        48
 #define ET_REFRESH_MS    1000
+#define ET_ANIM_MS         80
 #define ET_DEAUTH_BURST    3   /* frames per tick per direction              */
 
 static const char k_pw_charset[] =
@@ -226,15 +227,15 @@ static void draw_passwd(void) {
     char buf[80];
     snprintf(buf, sizeof(buf), "Target: %.38s",
              s_target.ssid[0] ? s_target.ssid : "<hidden>");
-    bs_gfx_text(8, y, buf, g_bs_theme.dim, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.dim, ts2, true);
     y += lh2 + 2;
 
     snprintf(buf, sizeof(buf), "Auth: %s  ch%d",
              bs_wifi_auth_str(s_target.auth), s_target.channel);
-    bs_gfx_text(8, y, buf, g_bs_theme.dim, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.dim, ts2, true);
     y += lh2 + 4;
 
-    bs_gfx_text(8, y, "Password:", g_bs_theme.dim, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, "Password:", g_bs_theme.dim, ts2, true);
     y += lh2 + 2;
 
     /* Character editor row */
@@ -271,7 +272,7 @@ static void draw_passwd(void) {
         pw_len = (int)strlen(tp);
         snprintf(buf, sizeof(buf), "len:%d  pos:%d  '%c'",
                  pw_len, s_passwd_pos + 1, s_passwd[s_passwd_pos]);
-        bs_gfx_text(8, y, buf, g_bs_theme.dim, ts2);
+        bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.dim, ts2, true);
     }
 
     bs_ui_draw_hint("UP/DN=char  L/R=move  SEL=WPA2  BACK=open");
@@ -293,14 +294,14 @@ static void draw_running(void) {
     snprintf(buf, sizeof(buf), "%.30s  ch%d",
              s_target.ssid[0] ? s_target.ssid : "<hidden>",
              s_target.channel);
-    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, false);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
     wifi_sta_list_t sta = {};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients:%d  Deauth:%lu",
              sta.num, (unsigned long)s_deauth_total);
-    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, false);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
     y += lh2 + 2;
 
     int n_creds = wifi_portal_cred_count();
@@ -308,7 +309,7 @@ static void draw_running(void) {
         const wifi_portal_cred_t* last = wifi_portal_get_cred(n_creds - 1);
         snprintf(buf, sizeof(buf), "Creds:%d  %.16s/%.16s",
                  n_creds, last ? last->user : "", last ? last->pass : "");
-        bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts2, false);
+        bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts2, true);
         y += lh2;
     }
 
@@ -323,7 +324,7 @@ static void draw_running(void) {
         bs_color_t c = (i == s_log_count - 1) ? g_bs_theme.primary : g_bs_theme.dim;
         int ly = y + i * lh2;
         if (ly + lh2 > max_y) break;
-        bs_ui_draw_text_box(8, ly, sw - 16, s_log[idx], c, ts2, false);
+        bs_ui_draw_text_box(8, ly, sw - 16, s_log[idx], c, ts2, true);
     }
 
     bs_ui_draw_hint("BACK=stop");
@@ -350,6 +351,7 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
 
     uint32_t last_scan_draw  = 0;
     uint32_t last_refresh    = 0;
+    uint32_t last_anim_ms    = 0;
 
     uint32_t prev_ms = arch->millis();
     for (;;) {
@@ -495,8 +497,11 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
             }
         }
 
+        bool anim_due = bs_ui_carousel_enabled()
+                     && (uint32_t)(now - last_anim_ms) >= (uint32_t)ET_ANIM_MS;
+
         /* ── Draw ───────────────────────────────────────────────────────── */
-        if (s_dirty) {
+        if (s_dirty || anim_due) {
             s_dirty = false;
             switch (s_phase) {
             case ET_SCAN:    draw_scan();    break;
@@ -504,14 +509,19 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
             case ET_PASSWD:  draw_passwd();  break;
             case ET_RUNNING: draw_running(); break;
             }
+            if (anim_due) last_anim_ms = now;
         }
 
         if (s_phase == ET_RUNNING && (now - last_refresh) >= (uint32_t)ET_REFRESH_MS) {
             last_refresh = now;
-            draw_running();
+            s_dirty = true;
         }
 
+#if defined(VARIANT_TPAGER)
+        arch->delay_ms(s_phase == ET_RUNNING ? 2 : 1);
+#else
         arch->delay_ms(s_phase == ET_RUNNING ? 5 : 10);
+#endif
     }
 }
 
