@@ -50,6 +50,21 @@ static void bs_cardputer_panel_fixup(void) {
 static void bs_cardputer_panel_fixup(void) {}
 #endif
 
+#if defined(VARIANT_TDONGLE_S3)
+static void bs_tdongle_s3_panel_fixup(void) {
+    if (!s_dev.bus || !s_dev.bus->ops) return;
+    if (s_dev.bus->ops->gpio_set) {
+#if defined(BS_SGFX_BL_ACTIVE_LOW) && BS_SGFX_BL_ACTIVE_LOW
+        (void)s_dev.bus->ops->gpio_set(s_dev.bus, 3 /* BL */, 0);
+#else
+        (void)s_dev.bus->ops->gpio_set(s_dev.bus, 3 /* BL */, 1);
+#endif
+    }
+}
+#else
+static void bs_tdongle_s3_panel_fixup(void) {}
+#endif
+
 /* ---- internal FB helpers --------------------------------------------- */
 
 static inline uint16_t pack565(bs_color_t c) {
@@ -124,6 +139,7 @@ int bs_gfx_init(const bs_arch_t* arch) {
     if (rc) return rc;
 
     bs_cardputer_panel_fixup();
+    bs_tdongle_s3_panel_fixup();
 
     s_w = (int)s_dev.caps.width;
     s_h = (int)s_dev.caps.height;

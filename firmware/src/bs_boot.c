@@ -47,39 +47,66 @@
  * Both rendered on the same baseline row.
  */
 static void draw_banner(const bs_arch_t* arch) {
-    int sw = bs_gfx_width();
+    const int sw = bs_gfx_width();
+    const int sh = bs_gfx_height();
 
-    /* Skull: 120×120 source rendered at step=2 → 60×60 on screen */
+    /* Tiny screens (e.g. 160x80 T-Dongle-S3): keep the splash compact but
+     * still retain the version tag. Target roughly the top third of the panel. */
+    if (sh <= 100 || sw <= 200) {
+        int sep_y = (sh * 34) / 100;
+        if (sep_y < 24) sep_y = 24;
+        if (sep_y > 30) sep_y = 30;
+
+        const int skull_x = 2;
+        const int skull_y = 2;
+        int skull_sz = sep_y - 6;
+        if (skull_sz < 14) skull_sz = 14;
+        int step = 120 / skull_sz;
+        if (step < 1) step = 1;
+        if (step > 8) step = 8;
+        skull_sz = (120 + step - 1) / step;
+
+        const int tx = skull_x + skull_sz + 4;
+        const int ty = 3;
+        const int ver_y = sep_y - bs_gfx_text_h(1) - 1;
+
+        bs_gfx_fill_rect(0, 0, sw, sep_y + 1, g_bs_theme.bg);
+        bs_gfx_bitmap_1bpp(skull_x, skull_y, 120, 120, bs_skull_120,
+                           g_bs_theme.primary, 1, step);
+        bs_gfx_text(tx, ty, "BEAM", g_bs_theme.primary, 1);
+        bs_gfx_text(tx, ty + 8, "STALKER", g_bs_theme.accent, 1);
+        bs_gfx_text(tx, ver_y, "v" BS_VERSION, g_bs_theme.dim, 1);
+        bs_gfx_hline(0, sep_y, sw, g_bs_theme.dim);
+        bs_log_boot_reset(sep_y + 2);
+        bs_gfx_present();
+        (void)arch;
+        return;
+    }
+
+    /* Larger screens keep the original splash layout. */
     int skull_x = 4,  skull_y = 4;
     int skull_w = 60, skull_h = 60;
-    int sep_y   = skull_y + skull_h + 4;   /* guaranteed below skull: 4+60+4=68 */
+    int sep_y   = skull_y + skull_h + 4;
 
-    /* Clear banner region (exactly to separator, never more) */
     bs_gfx_fill_rect(0, 0, sw, sep_y + 1, g_bs_theme.bg);
-
-    /* Skull logo - top-left, downscaled 2× */
     bs_gfx_bitmap_1bpp(skull_x, skull_y, 120, 120, bs_skull_120, g_bs_theme.primary, 1, 2);
 
-    /* "BEAM STALKER" - right of skull, text block vertically centred in skull height */
     int sc      = 2;
-    int th      = bs_gfx_text_h(sc);                       /* 14 px */
-    int h1      = bs_gfx_text_h(1);                        /*  7 px */
-    int block_h = th + 3 + h1;                             /* 24 px */
-    int tx      = skull_x + skull_w + 10;                  /* 74    */
-    int ty      = skull_y + (skull_h - block_h) / 2;       /* 22    */
+    int th      = bs_gfx_text_h(sc);
+    int h1      = bs_gfx_text_h(1);
+    int block_h = th + 3 + h1;
+    int tx      = skull_x + skull_w + 10;
+    int ty      = skull_y + (skull_h - block_h) / 2;
     int bw      = bs_gfx_text_w("BEAM", sc);
     int sp      = bs_gfx_text_w(" ", sc);
-    bs_gfx_text(tx,        ty, "BEAM",    g_bs_theme.primary,     sc);
-    bs_gfx_text(tx+bw+sp,  ty, "STALKER", g_bs_theme.accent, sc);
+    bs_gfx_text(tx,        ty, "BEAM",    g_bs_theme.primary, sc);
+    bs_gfx_text(tx+bw+sp,  ty, "STALKER", g_bs_theme.accent,  sc);
 
-    /* Version tag */
     int vy = ty + th + 3;
     const char* ver = "v" BS_VERSION "  ·  cross-platform firmware";
     bs_gfx_text(tx, vy, ver, g_bs_theme.dim, 1);
 
-    /* Separator - anchored to skull bottom, not text bottom */
     bs_gfx_hline(0, sep_y, sw, g_bs_theme.dim);
-
     bs_log_boot_reset(sep_y + 3);
     bs_gfx_present();
     (void)arch;
@@ -103,6 +130,8 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     /* arch */
 #if defined(VARIANT_TPAGER)
     BS_LOGOK("arch", "ESP32-S3 arduino - T-Pager");
+#elif defined(VARIANT_TDONGLE_S3)
+    BS_LOGOK("arch", "ESP32-S3 arduino - T-Dongle-S3");
 #elif defined(VARIANT_CARDPUTER)
     BS_LOGOK("arch", "ESP32-S3 arduino - Cardputer");
 #elif defined(VARIANT_NATIVE)
@@ -153,6 +182,9 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     BS_LOGOK("encoder", "rotary input active");
     arch->delay_ms(60);
 #  endif
+#elif defined(BS_KEYS_GPIO)
+    BS_LOGOK("keyboard", "BOOT key: short=next  double=back  long=enter");
+    arch->delay_ms(100);
 #elif defined(BS_KEYS_NATIVE)
     BS_LOGOK("keyboard", "raw terminal input");
     arch->delay_ms(60);

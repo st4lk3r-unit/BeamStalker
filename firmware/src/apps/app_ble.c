@@ -153,7 +153,7 @@ static void app_ble_run(const bs_arch_t* arch) {
             dirty = false;
             if (anim_due) last_anim_ms = now;
         }
-#if defined(VARIANT_TPAGER)
+#if defined(VARIANT_TPAGER) || defined(VARIANT_TDONGLE_S3)
         arch->delay_ms(1);
 #else
         arch->delay_ms(2);

@@ -194,7 +194,7 @@ static void app_log_run(const bs_arch_t* arch) {
                     break;
             }
         }
-#if defined(VARIANT_TPAGER)
+#if defined(VARIANT_TPAGER) || defined(VARIANT_TDONGLE_S3)
         arch->delay_ms(1);
 #else
         arch->delay_ms(2);
