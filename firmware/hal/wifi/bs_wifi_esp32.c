@@ -27,6 +27,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_err.h"
+#include "esp_idf_version.h"
 
 /* ── Private state ──────────────────────────────────────────────────────── */
 
@@ -35,8 +36,10 @@ static uint32_t           s_caps      = 0;
 static bs_wifi_frame_cb_t s_frame_cb  = NULL;
 static void*              s_frame_ctx = NULL;
 static esp_netif_t*       s_sta_netif = NULL;
+static esp_netif_t*       s_ap_netif  = NULL;
 static volatile bool      s_scan_done = false;
 static volatile bool      s_connected = false;
+static volatile bool      s_ap_active = false;
 
 /* ── Auth conversion ─────────────────────────────────────────────────────── */
 
@@ -170,7 +173,7 @@ int bs_wifi_init(const bs_arch_t* arch) {
     esp_wifi_set_max_tx_power(84);
 
     s_caps  = BS_WIFI_CAP_CONNECT | BS_WIFI_CAP_SCAN
-            | BS_WIFI_CAP_SNIFF   | BS_WIFI_CAP_INJECT;
+            | BS_WIFI_CAP_SNIFF   | BS_WIFI_CAP_INJECT | BS_WIFI_CAP_AP;
     s_state = BS_WIFI_STATE_IDLE;
     return 0;
 }
@@ -190,6 +193,7 @@ void bs_wifi_deinit(void) {
     s_frame_cb  = NULL;
     s_frame_ctx = NULL;
     s_connected = false;
+    s_ap_active = false;
 }
 
 uint32_t bs_wifi_caps(void) { return s_caps; }
@@ -293,6 +297,110 @@ int bs_wifi_get_ip(char* buf, size_t len) {
     if (info.ip.addr == 0) return -1;
     esp_ip4addr_ntoa(&info.ip, buf, (int)len);
     return 0;
+}
+
+/* ── SoftAP / APSTA hosting ────────────────────────────────────────────── */
+
+int bs_wifi_ap_start(const char* ssid, uint8_t channel, const char* password) {
+    if (s_state == BS_WIFI_STATE_OFF && bs_wifi_init(NULL) != 0) return -2;
+    if (!(s_caps & BS_WIFI_CAP_AP)) return -1;
+
+    if (!ssid || ssid[0] == '\0') ssid = "FreeWifi";
+
+    s_ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (!s_ap_netif)
+        s_ap_netif = esp_netif_create_default_wifi_ap();
+    if (!s_ap_netif) return -2;
+
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_disconnect();
+
+    if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) return -2;
+
+    wifi_config_t ap_cfg = (wifi_config_t){0};
+    size_t ssid_len = strnlen(ssid, 32);
+    memcpy(ap_cfg.ap.ssid, ssid, ssid_len);
+    ap_cfg.ap.ssid_len        = (uint8_t)ssid_len;
+    ap_cfg.ap.channel         = channel ? channel : 1;
+    ap_cfg.ap.max_connection  = 8;
+    ap_cfg.ap.beacon_interval = 100;
+
+    size_t pass_len = password ? strnlen(password, 64) : 0;
+    if (pass_len >= 8) {
+        memcpy(ap_cfg.ap.password, password, pass_len);
+        ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    } else {
+        ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
+    }
+
+    if (esp_wifi_set_config(WIFI_IF_AP, &ap_cfg) != ESP_OK) return -2;
+    s_ap_active = true;
+    if (s_state == BS_WIFI_STATE_OFF) s_state = BS_WIFI_STATE_IDLE;
+    return 0;
+}
+
+void bs_wifi_ap_stop(void) {
+    if (s_state == BS_WIFI_STATE_OFF) return;
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    s_ap_active = false;
+    if (s_state != BS_WIFI_STATE_CONNECTING && s_state != BS_WIFI_STATE_CONNECTED)
+        s_state = BS_WIFI_STATE_IDLE;
+}
+
+int bs_wifi_ap_client_count(void) {
+    if (!(s_caps & BS_WIFI_CAP_AP) || !s_ap_active) return 0;
+    wifi_sta_list_t sta = (wifi_sta_list_t){0};
+    if (esp_wifi_ap_get_sta_list(&sta) != ESP_OK) return -2;
+    return (int)sta.num;
+}
+
+int bs_wifi_ap_client_list(bs_wifi_sta_t* out, int max_count) {
+    if (!(s_caps & BS_WIFI_CAP_AP)) return -1;
+    if (!s_ap_active) return 0;
+    if (!out || max_count <= 0) return 0;
+    wifi_sta_list_t sta = (wifi_sta_list_t){0};
+    if (esp_wifi_ap_get_sta_list(&sta) != ESP_OK) return -2;
+    int count = (int)sta.num;
+    if (count > max_count) count = max_count;
+    for (int i = 0; i < count; i++)
+        memcpy(out[i].mac, sta.sta[i].mac, 6);
+    return count;
+}
+
+int bs_wifi_ap_set_dns_ip(const uint8_t ip[4]) {
+    if (!(s_caps & BS_WIFI_CAP_AP) || !ip) return -1;
+    if (!s_ap_netif)
+        s_ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (!s_ap_netif) return -2;
+    esp_netif_dhcps_stop(s_ap_netif);
+    if (esp_netif_dhcps_option(s_ap_netif, ESP_NETIF_OP_SET,
+                               ESP_NETIF_DOMAIN_NAME_SERVER,
+                               (void*)ip, 4) != ESP_OK) {
+        return -2;
+    }
+    if (esp_netif_dhcps_start(s_ap_netif) != ESP_OK) return -2;
+    return 0;
+}
+
+int bs_wifi_ap_set_captive_portal_uri(const char* uri) {
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 2, 0)
+    if (!(s_caps & BS_WIFI_CAP_AP) || !uri || !uri[0]) return -1;
+    if (!s_ap_netif)
+        s_ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (!s_ap_netif) return -2;
+    esp_netif_dhcps_stop(s_ap_netif);
+    if (esp_netif_dhcps_option(s_ap_netif, ESP_NETIF_OP_SET,
+                               ESP_NETIF_CAPTIVEPORTAL_URI,
+                               (void*)uri, strlen(uri)) != ESP_OK) {
+        return -2;
+    }
+    if (esp_netif_dhcps_start(s_ap_netif) != ESP_OK) return -2;
+    return 0;
+#else
+    (void)uri;
+    return -1;
+#endif
 }
 
 /* ── Monitor mode ────────────────────────────────────────────────────────── */

@@ -34,8 +34,6 @@ extern "C" {
 
 #include <WebServer.h>
 #include <DNSServer.h>
-#include "esp_wifi.h"
-#include "esp_netif.h"
 #include <string.h>
 
 /* ── Portal login HTML ────────────────────────────────────────────────────── */
@@ -153,58 +151,12 @@ extern "C" bool wifi_portal_start(const char* ssid, uint8_t channel, const char*
 
     if (!ssid || ssid[0] == '\0') ssid = "FreeWifi";
 
-    /* Guard: recreating an existing netif key asserts-aborts; reuse if present. */
-    esp_netif_t* ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    if (!ap_netif)
-        ap_netif = esp_netif_create_default_wifi_ap();
-    if (!ap_netif) return false;
-
-    /* Force DHCP option 6 (DNS) to 192.168.4.1.  arduino-esp32 v3.x/IDF 5.x
-     * no longer reliably does this by default (arduino-esp32 #10330), so
-     * Android keeps its cellular DNS and our catch-all never sees probes.
-     * ESP_NETIF_OP_SET requires the server stopped first; WIFI_EVENT_AP_START
-     * restarts it automatically after esp_wifi_set_mode(APSTA).             */
     {
-        esp_netif_dhcps_stop(ap_netif);
-        uint8_t dns_ip[4] = {192, 168, 4, 1};
-        esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET,
-                               ESP_NETIF_DOMAIN_NAME_SERVER,
-                               dns_ip, sizeof(dns_ip));
+        const uint8_t dns_ip[4] = {192, 168, 4, 1};
+        if (bs_wifi_ap_start(ssid, channel, password) != 0) return false;
+        bs_wifi_ap_set_dns_ip(dns_ip);
+        bs_wifi_ap_set_captive_portal_uri("http://192.168.4.1/");
     }
-
-    esp_wifi_set_mode(WIFI_MODE_APSTA);   /* fires WIFI_EVENT_AP_START → DHCP up */
-
-    size_t ssid_len = strnlen(ssid, 32);
-    wifi_config_t ap_cfg = {};
-    memcpy(ap_cfg.ap.ssid, ssid, ssid_len);
-    ap_cfg.ap.ssid_len        = (uint8_t)ssid_len;
-    ap_cfg.ap.channel         = channel ? channel : 1;
-    ap_cfg.ap.max_connection  = 8;
-    ap_cfg.ap.beacon_interval = 100;
-
-    size_t pass_len = password ? strnlen(password, 64) : 0;
-    if (pass_len >= 8) {
-        /* WPA2 if password length >= 8 (minimum PSK length) */
-        memcpy(ap_cfg.ap.password, password, pass_len);
-        ap_cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
-    } else {
-        ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
-    }
-
-    if (esp_wifi_set_config(WIFI_IF_AP, &ap_cfg) != ESP_OK) return false;
-
-    /* DHCP Option 114 (Captive Portal URI): triggers Android 11+/iOS 14+
-     * browser without waiting for HTTP probes.  IDF 5.2+ only.             */
-#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 2, 0)
-    {
-        const char* portal_uri = "http://192.168.4.1/";
-        esp_netif_dhcps_stop(ap_netif);
-        esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET,
-                               ESP_NETIF_CAPTIVEPORTAL_URI,
-                               (void*)portal_uri, strlen(portal_uri));
-        esp_netif_dhcps_start(ap_netif);
-    }
-#endif
 
     /* DNS catch-all: every hostname resolves to our AP IP */
     s_dns.start(53, "*", k_ap_ip);
@@ -237,7 +189,7 @@ extern "C" void wifi_portal_stop(void) {
     /* Switch back to STA-only — fires WIFI_EVENT_AP_STOP → DHCP stops.
      * Do NOT call Arduino WiFi.mode() or WiFi.softAPdisconnect(): bs_wifi_esp32
      * owns the netif lifecycle and mixing Arduino calls causes assert-aborts.  */
-    esp_wifi_set_mode(WIFI_MODE_STA);
+    bs_wifi_ap_stop();
     s_active = false;
 }
 
@@ -249,9 +201,7 @@ extern "C" void wifi_portal_poll(void) {
 
 extern "C" int wifi_portal_client_count(void) {
     if (!s_active) return 0;
-    wifi_sta_list_t sta = {};
-    esp_wifi_ap_get_sta_list(&sta);
-    return (int)sta.num;
+    return bs_wifi_ap_client_count();
 }
 
 extern "C" bool wifi_portal_active(void) { return s_active; }

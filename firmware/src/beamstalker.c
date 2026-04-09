@@ -39,6 +39,7 @@
 #include "bs/bs_menu.h"
 #include "bs/bs_fs.h"
 #include "bs/bs_ui.h"
+#include "bs/bs_board.h"
 #include "bs_boot.h"
 
 #include "apps/app_settings.h"
@@ -72,17 +73,11 @@
 
 #include "konsole/konsole.h"
 #include "konsole/static.h"   /* struct kon_line_state */
-#include "board.h"            /* variant-specific defines (via -I variant/<name>) */
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-/* ---- Optional SIC ----------------------------------------------------- */
-#ifdef BS_USE_SIC
-#  include <sic/sic.h>
-#  include <sic/input/kscan.h>
-#endif
 
 /* ---- ESP log hook (captures [E][sd_diskio...] into bs_log ring) -------- */
 #ifdef ARCH_ESP32
@@ -221,17 +216,18 @@ static int cmd_hw(struct konsole* ks, int argc, char** argv) {
 #endif
     }
 
-#if defined(VARIANT_TPAGER)
-    /* XL9555 GPIO expander diagnostic */
-    {
-        bs_hw_xl9555_t xl;
-        bs_hw_xl9555_read(&xl);
-        if (!xl.reachable) {
+    if (bs_board_caps() & BS_BOARD_CAP_XL9555_DIAG) {
+        /* XL9555 GPIO expander diagnostic */
+        bs_board_diag_t xl;
+        bs_board_diag_read(&xl);
+        if (!xl.available) {
+            kon_printf(ks, "  XL9555: not configured\r\n");
+        } else if (!xl.reachable) {
             kon_printf(ks, "  XL9555: [ ERR ] I2C 0x20 not responding\r\n");
         } else {
-            bool sd_det = !(xl.input_1  & (1 << 2)); /* P12 active-LOW */
-            bool sd_en  =  (xl.output_1 & (1 << 4)); /* P14 HIGH = powered */
-            bool sd_out =  !(xl.config_1 & (1 << 4)); /* P14 configured as output */
+            bool sd_det = !(xl.input_1  & (1 << 2));
+            bool sd_en  =  (xl.output_1 & (1 << 4));
+            bool sd_out = !(xl.config_1 & (1 << 4));
             kon_printf(ks, "  XL9555: INPUT_1=0x%02X  CFG_1=0x%02X  OUT_1=0x%02X\r\n",
                        xl.input_1, xl.config_1, xl.output_1);
             kon_printf(ks, "          SD_DET(P12)=%s  SD_EN(P14)=%s(%s)\r\n",
@@ -240,7 +236,6 @@ static int cmd_hw(struct konsole* ks, int argc, char** argv) {
                        sd_out ? "out" : "BUG:in");
         }
     }
-#endif
 
     kon_printf(ks, "  Up    : %.1f s\r\n", (float)s_arch->millis() / 1000.0f);
     return 0;
@@ -929,7 +924,11 @@ static const struct kon_cmd k_cmds[] = {
 void bs_init(void) {
     s_arch = arch_bs();
     s_arch->init();
-    s_arch->uart_init(0, BS_UART_BAUD_VAL);
+#ifdef BS_UART_BAUD
+    s_arch->uart_init(0, BS_UART_BAUD);
+#else
+    s_arch->uart_init(0, 115200);
+#endif
 
     /* Graphics backend */
     bs_gfx_init(s_arch);
@@ -958,13 +957,10 @@ void bs_init(void) {
     /* Debug overlay */
     bs_debug_init(s_arch);
 
-#ifdef BS_USE_SIC
-    /* SIC must init before fs: XL9555 GPIO14 (SD power enable) is set by preinit */
-    sic_i2c_begin(I2C_SDA_PIN, I2C_SCL_PIN, 400000);
-    sic_begin_legacy(&BS_SIC_BOARD, NULL);
-#endif
+    /* Board bring-up owns target-specific early init (SIC, power rails, quirks). */
+    bs_board_init(s_arch);
 
-    /* Filesystem - SD power is now on (XL9555 GPIO14+GPIO13 set by SIC preinit) */
+    /* Filesystem - any board-specific storage power-up has already run. */
     bs_fs_init();
     bs_log_flush_sd();   /* write boot log ring to system.log on SD */
 

@@ -27,7 +27,6 @@
 #include "bs/bs_ui.h"
 #include "bs/bs_arch.h"
 
-#include "esp_wifi.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -124,13 +123,9 @@ static void probe_cb(const uint8_t* frame, uint16_t len,
 /* ── Probe response injection ────────────────────────────────────────────── */
 
 /* Runs in APSTA mode; queues unicast probe responses for matching probe requests. */
-static void ap_probe_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
-    if (type != WIFI_PKT_MGMT) return;
-    const wifi_promiscuous_pkt_t* pkt =
-        (const wifi_promiscuous_pkt_t*)buf;
-    const uint8_t* f = pkt->payload;
-    uint16_t len = (uint16_t)pkt->rx_ctrl.sig_len;
-    if (len >= 4) len -= 4;
+static void ap_probe_cb(const uint8_t* f, uint16_t len,
+                        int8_t rssi, void* ctx) {
+    (void)rssi; (void)ctx;
     if (len < 28) return;
     if ((f[0] & 0xFC) != 0x40) return;   /* not a probe request */
 
@@ -172,15 +167,11 @@ static void send_probe_response(const uint8_t* client_mac, const char* ssid) {
 }
 
 static void start_probe_monitor(void) {
-    wifi_promiscuous_filter_t f = (wifi_promiscuous_filter_t){0};
-    f.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT;
-    esp_wifi_set_promiscuous_filter(&f);
-    esp_wifi_set_promiscuous_rx_cb(ap_probe_cb);
-    esp_wifi_set_promiscuous(true);
+    bs_wifi_monitor_start(s_ap_ch, ap_probe_cb, NULL);
 }
 
 static void stop_probe_monitor(void) {
-    esp_wifi_set_promiscuous(false);
+    bs_wifi_monitor_stop();
 }
 
 static void draw_sniff_status_row(int y, float ts) {
@@ -308,9 +299,8 @@ static void draw_running(void) {
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
-    wifi_sta_list_t sta = (wifi_sta_list_t){0};
-    esp_wifi_ap_get_sta_list(&sta);
-    snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", sta.num);
+    int n_clients = wifi_portal_client_count();
+    snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", n_clients < 0 ? 0 : n_clients);
     bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
     y += lh2 + 4;
 
@@ -375,21 +365,22 @@ void wifi_karma_run(const bs_arch_t* arch) {
                 dirty = true;
             }
 
-            wifi_sta_list_t sta = (wifi_sta_list_t){0};
-            esp_wifi_ap_get_sta_list(&sta);
-            if (sta.num > s_prev_clients) {
-                for (int i = s_prev_clients; i < (int)sta.num; i++) {
+            bs_wifi_sta_t sta[8];
+            int sta_count = bs_wifi_ap_client_list(sta, 8);
+            if (sta_count < 0) sta_count = 0;
+            if (sta_count > s_prev_clients) {
+                for (int i = s_prev_clients; i < sta_count; i++) {
                     ka_log("Client %02X:%02X:%02X:.. joined",
-                           sta.sta[i].mac[0],
-                           sta.sta[i].mac[1],
-                           sta.sta[i].mac[2]);
+                           sta[i].mac[0],
+                           sta[i].mac[1],
+                           sta[i].mac[2]);
                 }
                 dirty = true;
-            } else if (sta.num < s_prev_clients) {
+            } else if (sta_count < s_prev_clients) {
                 ka_log("Client disconnected");
                 dirty = true;
             }
-            s_prev_clients = sta.num;
+            s_prev_clients = sta_count;
         }
 
         /* ── Sniff: channel hop ──────────────────────────────────────────── */
