@@ -1,5 +1,5 @@
 /*
- * wifi_captive.cpp - Manual captive portal sub-application.
+ * wifi_captive.c - Manual captive portal sub-application.
  *
  * Flow:
  *   SSID_EDIT   - type a custom SSID using character cycling
@@ -24,14 +24,12 @@
 
 #include "wifi_captive.h"
 
-extern "C" {
 #include "bs/bs_wifi.h"
 #include "bs/bs_gfx.h"
 #include "bs/bs_nav.h"
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 #include "bs/bs_arch.h"
-}
 
 #include "esp_wifi.h"
 
@@ -47,6 +45,7 @@ extern "C" {
 #define CP_LOG_LINES      5
 #define CP_LOG_LEN       48
 #define CP_REFRESH_MS  1000
+#define CP_ANIM_MS       40
 
 /* ── Character set ───────────────────────────────────────────────────────── */
 
@@ -121,7 +120,7 @@ static void draw_ssid_edit(void) {
     bs_gfx_clear(g_bs_theme.bg);
     bs_ui_draw_header("Captive Portal / SSID");
 
-    bs_gfx_text(8, y, "SSID:", g_bs_theme.dim, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, "SSID:", g_bs_theme.dim, ts2, true);
     y += lh2 + 2;
 
     int chars_per_row = (sw - 16) / (cw + 2);
@@ -156,7 +155,7 @@ static void draw_ssid_edit(void) {
         char cur = s_ssid[s_edit_pos];
         snprintf(hint, sizeof(hint), "pos %d: '%c'  (UP/DOWN cycle)",
                  s_edit_pos + 1, cur == ' ' ? ' ' : cur);
-        bs_gfx_text(8, y, hint, g_bs_theme.dim, ts2);
+        bs_ui_draw_text_box(8, y, sw - 16, hint, g_bs_theme.dim, ts2, true);
     }
 
     bs_ui_draw_hint("UP/DN=char  L/R=move  SEL=next  BACK=exit");
@@ -175,23 +174,24 @@ static void draw_ch_select(void) {
 
     char buf[48];
     snprintf(buf, sizeof(buf), "SSID: %.32s", trimmed_ssid());
-    bs_gfx_text(8, y, buf, g_bs_theme.dim, ts2);
+    bs_ui_draw_text_box(8, y, bs_gfx_width() - 16, buf, g_bs_theme.dim, ts2, true);
     y += lh2 + 8;
 
     snprintf(buf, sizeof(buf), "Channel: %d", s_channel);
-    bs_gfx_text(8, y, buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, y, bs_gfx_width() - 16, buf, g_bs_theme.accent, ts, true);
     y += lh + 4;
 
     if (y + lh2 < bs_gfx_height() - bs_gfx_text_h(ts2) - 6)
-        bs_gfx_text(8, y, "(1-13)", g_bs_theme.dim, ts2);
+        bs_ui_draw_text_box(8, y, bs_gfx_width() - 16, "(1-13)", g_bs_theme.dim, ts2, true);
 
     bs_ui_draw_hint("UP/DN=channel  SELECT=start  BACK=edit");
     bs_gfx_present();
 }
 
 static void draw_running(void) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
+    int sw  = bs_gfx_width();
     int y   = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts)  + 4;
     int lh2 = bs_gfx_text_h(ts2) + 3;
@@ -201,16 +201,16 @@ static void draw_running(void) {
 
     char buf[80];
     snprintf(buf, sizeof(buf), "AP: %.38s  ch%d", trimmed_ssid(), s_channel);
-    bs_gfx_text(8, y, buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
-    wifi_sta_list_t sta = {};
+    wifi_sta_list_t sta = (wifi_sta_list_t){0};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", sta.num);
-    bs_gfx_text(8, y, buf, g_bs_theme.primary, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
     y += lh2 + 4;
 
-    bs_gfx_fill_rect(4, y, bs_gfx_width() - 8, 1, g_bs_theme.dim);
+    bs_gfx_fill_rect(4, y, sw - 8, 1, g_bs_theme.dim);
     y += 5;
 
     int hint_h   = bs_gfx_text_h(ts2) + 6;
@@ -220,19 +220,18 @@ static void draw_running(void) {
     if (n_creds > 0) {
         snprintf(buf, sizeof(buf), "Creds: %d", n_creds);
         if (y + lh2 <= max_y) {
-            bs_gfx_text(8, y, buf, g_bs_theme.accent, ts2);
+            bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts2, true);
             y += lh2;
         }
-        /* Show the most recent credential */
         const wifi_portal_cred_t* last = wifi_portal_get_cred(n_creds - 1);
         if (last && y + lh2 <= max_y) {
             snprintf(buf, sizeof(buf), "  %.20s / %.20s",
                      last->user, last->pass);
-            bs_gfx_text(8, y, buf, g_bs_theme.primary, ts2);
+            bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
             y += lh2;
         }
         if (y < max_y)
-            bs_gfx_fill_rect(4, y, bs_gfx_width() - 8, 1, g_bs_theme.dim);
+            bs_gfx_fill_rect(4, y, sw - 8, 1, g_bs_theme.dim);
         y += 4;
     }
 
@@ -241,7 +240,7 @@ static void draw_running(void) {
         bs_color_t c = (i == s_log_count - 1) ? g_bs_theme.accent : g_bs_theme.dim;
         int line_y = y + i * lh2;
         if (line_y + lh2 > max_y) break;
-        bs_gfx_text(8, line_y, s_log[idx], c, ts2);
+        bs_ui_draw_text_box(8, line_y, sw - 16, s_log[idx], c, ts2, true);
     }
 
     bs_ui_draw_hint("BACK=stop");
@@ -250,7 +249,7 @@ static void draw_running(void) {
 
 /* ── Main entry ──────────────────────────────────────────────────────────── */
 
-extern "C" void wifi_captive_run(const bs_arch_t* arch) {
+void wifi_captive_run(const bs_arch_t* arch) {
     s_phase        = CP_SSID_EDIT;
     s_channel      = 1;
     s_edit_pos     = 0;
@@ -267,15 +266,19 @@ extern "C" void wifi_captive_run(const bs_arch_t* arch) {
 
     bool dirty       = true;
     uint32_t last_refresh = 0;
+    uint32_t last_anim_ms = 0;
 
+    uint32_t prev_ms = arch->millis();
     for (;;) {
         uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
 
         /* ── Portal service (RUNNING) ───────────────────────────────────── */
         if (s_phase == CP_RUNNING && wifi_portal_active()) {
             wifi_portal_poll();
 
-            wifi_sta_list_t sta = {};
+            wifi_sta_list_t sta = (wifi_sta_list_t){0};
             esp_wifi_ap_get_sta_list(&sta);
             if (sta.num > s_prev_clients) {
                 for (int i = s_prev_clients; i < (int)sta.num; i++) {
@@ -284,8 +287,10 @@ extern "C" void wifi_captive_run(const bs_arch_t* arch) {
                            sta.sta[i].mac[1],
                            sta.sta[i].mac[2]);
                 }
+                dirty = true;
             } else if (sta.num < s_prev_clients) {
                 cp_log("Client disconnected");
+                dirty = true;
             }
             s_prev_clients = sta.num;
         }
@@ -322,7 +327,7 @@ extern "C" void wifi_captive_run(const bs_arch_t* arch) {
                 } else if (nav == BS_NAV_SELECT) {
                     const char* ssid = trimmed_ssid();
                     cp_log("Starting AP: %.28s ch%d", ssid, s_channel);
-                    if (wifi_portal_start(ssid, s_channel)) {
+                    if (wifi_portal_start(ssid, s_channel, NULL)) {
                         cp_log("AP up at 192.168.4.1");
                         cp_log("Serving captive portal...");
                         s_phase      = CP_RUNNING;
@@ -344,22 +349,30 @@ extern "C" void wifi_captive_run(const bs_arch_t* arch) {
             }
         }
 
+        bool anim_due = bs_ui_carousel_enabled()
+                     && (uint32_t)(now - last_anim_ms) >= (uint32_t)CP_ANIM_MS;
+
         /* ── Draw ───────────────────────────────────────────────────────── */
-        if (dirty) {
+        if (dirty || anim_due) {
             dirty = false;
             switch (s_phase) {
             case CP_SSID_EDIT:  draw_ssid_edit(); break;
             case CP_CH_SELECT:  draw_ch_select(); break;
             case CP_RUNNING:    draw_running();   break;
             }
+            if (anim_due) last_anim_ms = now;
         }
 
         if (s_phase == CP_RUNNING && (now - last_refresh) >= (uint32_t)CP_REFRESH_MS) {
             last_refresh = now;
-            draw_running();
+            dirty = true;
         }
 
+#if defined(VARIANT_TPAGER)
+        arch->delay_ms(s_phase == CP_RUNNING ? 2 : 1);
+#else
         arch->delay_ms(s_phase == CP_RUNNING ? 10 : 5);
+#endif
     }
 }
 

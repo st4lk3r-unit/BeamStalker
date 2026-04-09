@@ -1,5 +1,5 @@
 /*
- * bs_ble_esp32.cpp - BLE backend for ESP32/S3 (Arduino + ESP-IDF Bluedroid).
+ * bs_ble_esp32.c - BLE backend for ESP32/S3 (Arduino + ESP-IDF Bluedroid).
  *
  * Capabilities advertised:
  *   BS_BLE_CAP_ADVERTISE  — raw AD payload advertising via esp_ble_gap_*
@@ -28,13 +28,11 @@
 #include "bs/bs_ble.h"
 #include <string.h>
 
-extern "C" {
 #include "esp_bt.h"
 #include "esp_bt_main.h"      /* esp_bluedroid_init/enable, esp_bt_controller_* */
 #include "esp_gap_ble_api.h"  /* esp_ble_gap_*, esp_power_level_t              */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-}
 
 /* ── Private state ──────────────────────────────────────────────────────── */
 
@@ -68,9 +66,9 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
         case ESP_GAP_BLE_SCAN_RESULT_EVT: {
             if (!s_scan_cb) break;
             if (param->scan_rst.search_evt != ESP_GAP_SEARCH_INQ_RES_EVT) break;
-            bs_ble_scan_result_t r = {};
+            bs_ble_scan_result_t r = (bs_ble_scan_result_t){0};
             memcpy(r.addr, param->scan_rst.bda, 6);
-            r.rssi = static_cast<int8_t>(param->scan_rst.rssi);
+            r.rssi = (int8_t)param->scan_rst.rssi;
             uint8_t adv_len = param->scan_rst.adv_data_len;
             if (adv_len > 31) adv_len = 31;
             memcpy(r.adv.data, param->scan_rst.ble_adv, adv_len);
@@ -120,7 +118,7 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
 
 /* ── Lifecycle ───────────────────────────────────────────────────────────── */
 
-extern "C" int bs_ble_init(const bs_arch_t* arch) {
+int bs_ble_init(const bs_arch_t* arch) {
     (void)arch;
     if (s_init) return 0;
 
@@ -152,7 +150,7 @@ extern "C" int bs_ble_init(const bs_arch_t* arch) {
     return 0;
 }
 
-extern "C" void bs_ble_deinit(void) {
+void bs_ble_deinit(void) {
     if (!s_init) return;
     bs_ble_adv_stop();
     bs_ble_scan_stop();
@@ -171,13 +169,13 @@ extern "C" void bs_ble_deinit(void) {
     s_init               = false;
 }
 
-extern "C" uint32_t bs_ble_caps(void) {
+uint32_t bs_ble_caps(void) {
     return BS_BLE_CAP_ADVERTISE | BS_BLE_CAP_SCAN | BS_BLE_CAP_RAND_ADDR;
 }
 
 /* ── Address ─────────────────────────────────────────────────────────────── */
 
-extern "C" int bs_ble_set_addr(const uint8_t addr[6]) {
+int bs_ble_set_addr(const uint8_t addr[6]) {
     if (!s_init) return -2;
     uint8_t tmp[6];
     memcpy(tmp, addr, 6);
@@ -190,7 +188,7 @@ extern "C" int bs_ble_set_addr(const uint8_t addr[6]) {
 
 /* ── TX power ────────────────────────────────────────────────────────────── */
 
-extern "C" int bs_ble_set_tx_power(int dbm) {
+int bs_ble_set_tx_power(int dbm) {
     if (!s_init) return -2;
     esp_power_level_t lvl = dbm_to_esp_level(dbm);
     /* Set power for both advertising and scanning */
@@ -201,22 +199,22 @@ extern "C" int bs_ble_set_tx_power(int dbm) {
 
 /* ── Advertising ─────────────────────────────────────────────────────────── */
 
-extern "C" int bs_ble_adv_start(const bs_ble_adv_data_t* data,
+int bs_ble_adv_start(const bs_ble_adv_data_t* data,
                                  uint32_t interval_ms) {
     if (!s_init || !data)         return -2;
     if (s_advertising) bs_ble_adv_stop();
 
     /* Raw payload — delivered byte-for-byte, no stack modification */
     esp_err_t err = esp_ble_gap_config_adv_data_raw(
-                        const_cast<uint8_t*>(data->data), data->len);
+                        (uint8_t*)data->data, data->len);
     if (err != ESP_OK) return -2;
 
     /* Convert ms to BLE units (0.625 ms per unit, min=0x20, max=0x4000) */
-    uint16_t units = static_cast<uint16_t>(interval_ms * 8 / 5);
+    uint16_t units = (uint16_t)(interval_ms * 8 / 5);
     if (units < 0x0020) units = 0x0020;
     if (units > 0x4000) units = 0x4000;
 
-    esp_ble_adv_params_t params = {};
+    esp_ble_adv_params_t params = (esp_ble_adv_params_t){0};
     params.adv_int_min       = units;
     params.adv_int_max       = units;
     params.adv_type          = ADV_TYPE_IND;
@@ -231,23 +229,23 @@ extern "C" int bs_ble_adv_start(const bs_ble_adv_data_t* data,
     return 0;
 }
 
-extern "C" void bs_ble_adv_stop(void) {
+void bs_ble_adv_stop(void) {
     if (!s_init || !s_advertising) return;
     esp_ble_gap_stop_advertising();
     s_advertising = false;
 }
 
-extern "C" int bs_ble_adv_update(const bs_ble_adv_data_t* data) {
+int bs_ble_adv_update(const bs_ble_adv_data_t* data) {
     if (!s_init || !data) return -2;
     /* Update payload in-place; advertising continues without a gap */
     esp_err_t err = esp_ble_gap_config_adv_data_raw(
-                        const_cast<uint8_t*>(data->data), data->len);
+                        (uint8_t*)data->data, data->len);
     return (err == ESP_OK) ? 0 : -2;
 }
 
 /* ── Scanning ────────────────────────────────────────────────────────────── */
 
-extern "C" int bs_ble_scan_start(bs_ble_scan_cb_t cb, void* ctx) {
+int bs_ble_scan_start(bs_ble_scan_cb_t cb, void* ctx) {
     if (!s_init || !cb) return -2;
     if (s_scanning || s_scan_start_pending) return 0;
 
@@ -255,7 +253,7 @@ extern "C" int bs_ble_scan_start(bs_ble_scan_cb_t cb, void* ctx) {
     s_scan_ctx           = ctx;
     s_scan_start_pending = true;
 
-    esp_ble_scan_params_t scan_params = {};
+    esp_ble_scan_params_t scan_params = (esp_ble_scan_params_t){0};
     scan_params.scan_type          = BLE_SCAN_TYPE_PASSIVE;
     scan_params.own_addr_type      = BLE_ADDR_TYPE_PUBLIC;  /* no random addr needed for rx */
     scan_params.scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL;
@@ -275,7 +273,7 @@ extern "C" int bs_ble_scan_start(bs_ble_scan_cb_t cb, void* ctx) {
     return 0;
 }
 
-extern "C" void bs_ble_scan_stop(void) {
+void bs_ble_scan_stop(void) {
     if (!s_init) return;
 
     if (s_scan_start_pending) {

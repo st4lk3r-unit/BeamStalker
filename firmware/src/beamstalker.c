@@ -55,9 +55,19 @@
 #if defined(BS_HAS_WIFI) && !defined(BS_NO_APP_WIFI)
 #  include "apps/app_wifi.h"
 #endif
+#ifdef BS_HAS_WIFI
+#  include "apps/wifi/wifi_deauth_svc.h"
+#  include "apps/wifi/wifi_beacon_svc.h"
+#  include "apps/wifi/wifi_sniffer_svc.h"
+#endif
 #include "bs/bs_ble.h"    /* defines BS_HAS_BLE when a backend is active */
 #if defined(BS_HAS_BLE) && !defined(BS_NO_APP_BLE)
 #  include "apps/app_ble.h"
+#endif
+#ifdef BS_HAS_BLE
+#  include "apps/ble/ble_spam_svc.h"
+#  include "apps/ble/ble_scan_svc.h"
+#  include "apps/ble/ble_common.h"   /* k_ble_spam_mode_names */
 #endif
 
 #include "konsole/konsole.h"
@@ -102,9 +112,13 @@ static size_t io_write(void* ctx, const uint8_t* buf, size_t len) {
 
 static uint32_t io_millis(void* ctx) { (void)ctx; return s_arch->millis(); }
 
+/* ---- Forward declaration (attack tick, defined below) ----------------- */
+static void hl_tick(void);
+
 /* ---- Idle callbacks --------------------------------------------------- */
 static void menu_idle_poll(void) {
     konsole_poll(&g_ks);
+    hl_tick();   /* drive any CLI-started attack on non-headless targets too */
 }
 
 static void boot_idle_poll(void) {
@@ -313,12 +327,602 @@ static int cmd_startapp(struct konsole* ks, int argc, char** argv) {
     return 1;
 }
 
+/* ---- Attack command engine -------------------------------------------- */
+/*
+ * CLI-controlled background attacks.  The same service layer used by the
+ * UI apps is driven here, so there is zero duplicated attack logic.
+ * hl_tick() is called from both menu_idle_poll (non-headless) and the
+ * headless bs_run() loop — commands work on every build target.
+ *
+ * Commands:
+ *   wifi                                        - show WiFi/attack status
+ *   wifi beacon start [--mode random|custom]
+ *                     [--prefix P] [--charset ascii|hi|kata|cyr] [--ch N]
+ *   wifi beacon stop
+ *   wifi deauth  start [--ch N]                 - broadcast flood
+ *   wifi deauth  stop
+ *   wifi sniff   start [--ch N]                 - passive capture, auto-hop if no --ch
+ *   wifi sniff   stop
+ *   ble spam start [--mode apple|samsung|google|name|all] [--ivl ms]
+ *   ble spam stop
+ *   ble scan start
+ *   ble scan stop
+ */
+
+typedef enum {
+    HL_IDLE = 0,
+    HL_WIFI_BEACON,
+    HL_WIFI_DEAUTH,
+    HL_WIFI_SNIFF,
+    HL_BLE_SPAM,
+    HL_BLE_SCAN,
+} hl_mode_t;
+
+static hl_mode_t       s_hl_mode        = HL_IDLE;
+static struct konsole* s_hl_ks          = NULL;
+static uint32_t        s_hl_last_report = 0;
+static uint32_t        s_hl_last_total  = 0;  /* for delta reporting */
+static int             s_hl_last_log    = 0;  /* deauth log watermark */
+
+/* Stop whatever is currently active */
+static void hl_stop(void) {
+    switch (s_hl_mode) {
+#ifdef BS_HAS_WIFI
+        case HL_WIFI_BEACON:
+            beacon_svc_stop();
+            bs_wifi_deinit();
+            break;
+        case HL_WIFI_DEAUTH:
+            deauth_svc_stop();
+            bs_wifi_deinit();
+            break;
+        case HL_WIFI_SNIFF:
+            sniffer_svc_stop();
+            bs_wifi_deinit();
+            break;
+#endif
+#ifdef BS_HAS_BLE
+        case HL_BLE_SPAM:
+            ble_spam_svc_stop();
+            bs_ble_deinit();
+            break;
+        case HL_BLE_SCAN:
+            ble_scan_svc_stop();
+            bs_ble_deinit();
+            break;
+#endif
+        default: break;
+    }
+    s_hl_mode        = HL_IDLE;
+    s_hl_ks          = NULL;
+    s_hl_last_report = 0;
+    s_hl_last_total  = 0;
+    s_hl_last_log    = 0;
+}
+
+/* Ticked every loop iteration (both headless and menu idle) */
+static void hl_tick(void) {
+    if (s_hl_mode == HL_IDLE || !s_hl_ks) return;
+    uint32_t now = s_arch->millis();
+
+#ifdef BS_HAS_WIFI
+    if (s_hl_mode == HL_WIFI_BEACON) {
+        beacon_svc_tick(now);
+        if (now - s_hl_last_report >= 5000) {
+            s_hl_last_report = now;
+            kon_printf(s_hl_ks, "[beacon] %lu frames  pps=%lu  ssid=%s  ch=%u\r\n",
+                       (unsigned long)beacon_svc_frames(),
+                       (unsigned long)beacon_svc_pps(),
+                       beacon_svc_cur_ssid(),
+                       (unsigned)beacon_svc_cur_channel());
+        }
+        return;
+    }
+
+    if (s_hl_mode == HL_WIFI_DEAUTH) {
+        deauth_svc_tick(now);
+        /* Print new service log entries as they arrive */
+        if (deauth_svc_log_dirty()) {
+            int n = deauth_svc_log_count();
+            for (int i = s_hl_last_log; i < n; i++)
+                kon_printf(s_hl_ks, "[deauth] %s\r\n", deauth_svc_log_line(i));
+            s_hl_last_log = n;
+            deauth_svc_log_clear_dirty();
+        }
+        if (now - s_hl_last_report >= 5000) {
+            s_hl_last_report = now;
+            kon_printf(s_hl_ks, "[deauth] %lu frames  pps=%lu\r\n",
+                       (unsigned long)deauth_svc_frames(),
+                       (unsigned long)deauth_svc_pps());
+        }
+        return;
+    }
+
+    if (s_hl_mode == HL_WIFI_SNIFF) {
+        sniffer_svc_tick(now);
+        if (now - s_hl_last_report >= 3000) {
+            s_hl_last_report = now;
+            uint32_t tot   = sniffer_svc_count();
+            uint32_t delta = tot - s_hl_last_total;
+            s_hl_last_total = tot;
+            kon_printf(s_hl_ks, "[sniff] total=%lu  +%lu/3s  ch=%u  drop=%lu\r\n",
+                       (unsigned long)tot, (unsigned long)delta,
+                       (unsigned)sniffer_svc_channel(),
+                       (unsigned long)sniffer_svc_dropped());
+        }
+        return;
+    }
+#endif /* BS_HAS_WIFI */
+
+#ifdef BS_HAS_BLE
+    if (s_hl_mode == HL_BLE_SPAM) {
+        ble_spam_svc_tick(now);
+        if (now - s_hl_last_report >= 5000) {
+            s_hl_last_report = now;
+            kon_printf(s_hl_ks, "[ble-spam] %lu adverts  mode=%s  ivl=%lums\r\n",
+                       (unsigned long)ble_spam_svc_count(),
+                       k_ble_spam_mode_names[ble_spam_svc_mode()],
+                       (unsigned long)ble_spam_svc_interval_ms());
+        }
+        return;
+    }
+
+    if (s_hl_mode == HL_BLE_SCAN) {
+        /* BLE scan is callback-driven; no tick needed — just report */
+        if (now - s_hl_last_report >= 3000) {
+            s_hl_last_report = now;
+            int  tot   = ble_scan_svc_count();
+            uint32_t delta = (uint32_t)tot - s_hl_last_total;
+            s_hl_last_total = (uint32_t)tot;
+            kon_printf(s_hl_ks, "[ble-scan] total=%d  +%lu/3s\r\n",
+                       tot, (unsigned long)delta);
+        }
+        return;
+    }
+#endif /* BS_HAS_BLE */
+}
+
+/* ---- 'wifi' command ---------------------------------------------------- */
+#ifdef BS_HAS_WIFI
+static int cmd_wifi(struct konsole* ks, int argc, char** argv) {
+    if (argc < 2) {
+        uint32_t caps = bs_wifi_caps();
+        char capbuf[64] = "";
+        if (caps & BS_WIFI_CAP_SCAN)    { strcat(capbuf, "SCAN ");    }
+        if (caps & BS_WIFI_CAP_CONNECT) { strcat(capbuf, "CONNECT "); }
+        if (caps & BS_WIFI_CAP_SNIFF)   { strcat(capbuf, "SNIFF ");   }
+        if (caps & BS_WIFI_CAP_MONITOR) { strcat(capbuf, "MONITOR "); }
+        if (caps & BS_WIFI_CAP_INJECT)  { strcat(capbuf, "INJECT ");  }
+        /* trim trailing space */
+        int clen = (int)strlen(capbuf);
+        if (clen > 0 && capbuf[clen-1] == ' ') capbuf[clen-1] = '\0';
+        kon_printf(ks, "WiFi caps: %s\r\n", capbuf[0] ? capbuf : "(none)");
+        switch (s_hl_mode) {
+            case HL_WIFI_BEACON:
+                kon_printf(ks, "Active: beacon spam  %lu frames  pps=%lu\r\n",
+                           (unsigned long)beacon_svc_frames(),
+                           (unsigned long)beacon_svc_pps()); break;
+            case HL_WIFI_DEAUTH:
+                kon_printf(ks, "Active: deauth flood  %lu frames  pps=%lu\r\n",
+                           (unsigned long)deauth_svc_frames(),
+                           (unsigned long)deauth_svc_pps()); break;
+            case HL_WIFI_SNIFF:
+                kon_printf(ks, "Active: sniffer  %lu packets  ch=%u\r\n",
+                           (unsigned long)sniffer_svc_count(),
+                           (unsigned)sniffer_svc_channel()); break;
+            default:
+                kon_printf(ks, "Idle.\r\n"); break;
+        }
+        return 0;
+    }
+
+    const char* sub  = argv[1];
+    const char* verb = (argc >= 3) ? argv[2] : "";
+
+    /* ---- beacon ---- */
+    if (bs_stricmp(sub, "beacon") == 0) {
+        if (bs_stricmp(verb, "stop") == 0) {
+            if (s_hl_mode == HL_WIFI_BEACON) { hl_stop(); kon_printf(ks, "Beacon spam stopped.\r\n"); }
+            else kon_printf(ks, "Not running.\r\n");
+            return 0;
+        }
+        if (bs_stricmp(verb, "start") == 0) {
+            if (s_hl_mode != HL_IDLE) hl_stop();
+            if (bs_wifi_init(s_arch) < 0) { kon_printf(ks, "WiFi init failed.\r\n"); return 1; }
+            /* Parse options */
+            beacon_svc_mode_t  mode    = BEACON_MODE_RANDOM;
+            wifi_charset_t     charset = WIFI_CHARSET_ASCII;
+            char               prefix[21] = "testAP";
+            int                repeat  = 3;
+            uint8_t            channel = 6;
+            for (int i = 3; i < argc - 1; i++) {
+                if (strcmp(argv[i], "--mode") == 0 && i+1 < argc) {
+                    if (strcmp(argv[i+1], "custom") == 0) mode = BEACON_MODE_CUSTOM;
+                    else if (strcmp(argv[i+1], "file") == 0) mode = BEACON_MODE_FILE;
+                    i++;
+                } else if (strcmp(argv[i], "--prefix") == 0 && i+1 < argc) {
+                    strncpy(prefix, argv[i+1], sizeof prefix - 1);
+                    mode = BEACON_MODE_CUSTOM; i++;
+                } else if (strcmp(argv[i], "--charset") == 0 && i+1 < argc) {
+                    if      (strcmp(argv[i+1],"hi")   == 0) charset = WIFI_CHARSET_HIRAGANA;
+                    else if (strcmp(argv[i+1],"kata") == 0) charset = WIFI_CHARSET_KATAKANA;
+                    else if (strcmp(argv[i+1],"cyr")  == 0) charset = WIFI_CHARSET_CYRILLIC;
+                    i++;
+                } else if (strcmp(argv[i], "--ch") == 0 && i+1 < argc) {
+                    int ch = atoi(argv[i+1]);
+                    if (ch >= 1 && ch <= 13) channel = (uint8_t)ch;
+                    i++;
+                } else if (strcmp(argv[i], "--repeat") == 0 && i+1 < argc) {
+                    repeat = atoi(argv[i+1]); i++;
+                }
+            }
+            beacon_svc_init(s_arch);
+            beacon_svc_start(mode, charset, prefix, repeat, NULL, 0);
+            /* Seed the channel (service picks random; override if user specified) */
+            (void)channel;  /* service picks per-beacon random channel */
+            s_hl_mode = HL_WIFI_BEACON;
+            s_hl_ks   = ks;
+            s_hl_last_report = 0;
+            kon_printf(ks, "Beacon spam started (mode=%s).\r\n"
+                           "Reports every 5 s.  'wifi beacon stop' to halt.\r\n",
+                       mode == BEACON_MODE_CUSTOM ? "custom" :
+                       mode == BEACON_MODE_FILE   ? "file"   : "random");
+            return 0;
+        }
+        kon_printf(ks, "Usage: wifi beacon start|stop [--mode random|custom|file] "
+                       "[--prefix P] [--charset ascii|hi|kata|cyr] [--repeat N]\r\n");
+        return 0;
+    }
+
+    /* ---- deauth ---- */
+    if (bs_stricmp(sub, "deauth") == 0) {
+        if (bs_stricmp(verb, "stop") == 0) {
+            if (s_hl_mode == HL_WIFI_DEAUTH) { hl_stop(); kon_printf(ks, "Deauth stopped.\r\n"); }
+            else kon_printf(ks, "Not running.\r\n");
+            return 0;
+        }
+        if (bs_stricmp(verb, "start") == 0) {
+            if (s_hl_mode != HL_IDLE) hl_stop();
+            if (bs_wifi_init(s_arch) < 0) { kon_printf(ks, "WiFi init failed.\r\n"); return 1; }
+            uint8_t channel = 1;
+            for (int i = 3; i < argc - 1; i++) {
+                if (strcmp(argv[i], "--ch") == 0 && i+1 < argc) {
+                    int ch = atoi(argv[i+1]);
+                    if (ch >= 1 && ch <= 13) channel = (uint8_t)ch;
+                    i++;
+                }
+            }
+            deauth_svc_init(s_arch);
+            deauth_svc_attack_broadcast(channel);  /* shortcut: no scan needed */
+            s_hl_mode        = HL_WIFI_DEAUTH;
+            s_hl_ks          = ks;
+            s_hl_last_report = 0;
+            s_hl_last_log    = 0;
+            kon_printf(ks, "Deauth flood started (ch=%u, broadcast).\r\n"
+                           "Reports every 5 s.  'wifi deauth stop' to halt.\r\n",
+                       channel);
+            return 0;
+        }
+        kon_printf(ks, "Usage: wifi deauth start|stop [--ch N]\r\n");
+        return 0;
+    }
+
+    /* ---- sniff ---- */
+    if (bs_stricmp(sub, "sniff") == 0) {
+        if (bs_stricmp(verb, "stop") == 0) {
+            if (s_hl_mode == HL_WIFI_SNIFF) { hl_stop(); kon_printf(ks, "Sniffer stopped.\r\n"); }
+            else kon_printf(ks, "Not running.\r\n");
+            return 0;
+        }
+        if (bs_stricmp(verb, "start") == 0) {
+            if (s_hl_mode != HL_IDLE) hl_stop();
+            if (bs_wifi_init(s_arch) < 0) { kon_printf(ks, "WiFi init failed.\r\n"); return 1; }
+            uint8_t channel  = 0;  /* 0 = auto-hop */
+            for (int i = 3; i < argc - 1; i++) {
+                if (strcmp(argv[i], "--ch") == 0 && i+1 < argc) {
+                    int ch = atoi(argv[i+1]);
+                    if (ch >= 1 && ch <= 13) channel = (uint8_t)ch;
+                    i++;
+                }
+            }
+            sniffer_svc_init(s_arch);
+            sniffer_svc_start(channel, 500, NULL, NULL);  /* no pkt callback in CLI */
+            s_hl_mode        = HL_WIFI_SNIFF;
+            s_hl_ks          = ks;
+            s_hl_last_report = 0;
+            s_hl_last_total  = 0;
+            kon_printf(ks, "Sniffer started (ch=%u, %s).\r\n"
+                           "Reports every 3 s.  'wifi sniff stop' to halt.\r\n",
+                       channel ? channel : 1,
+                       channel ? "fixed" : "auto-hop");
+            return 0;
+        }
+        kon_printf(ks, "Usage: wifi sniff start|stop [--ch N]\r\n");
+        return 0;
+    }
+
+    kon_printf(ks, "Usage: wifi beacon|deauth|sniff start|stop [...]\r\n");
+    return 0;
+}
+#endif /* BS_HAS_WIFI */
+
+/* ---- 'ble' command ----------------------------------------------------- */
+#ifdef BS_HAS_BLE
+static int cmd_ble(struct konsole* ks, int argc, char** argv) {
+    if (argc < 2) {
+        uint32_t caps = bs_ble_caps();
+        kon_printf(ks, "BLE caps: %s%s%s\r\n",
+                   (caps & BS_BLE_CAP_ADVERTISE) ? "ADVERTISE " : "",
+                   (caps & BS_BLE_CAP_SCAN)      ? "SCAN "      : "",
+                   (caps & BS_BLE_CAP_RAND_ADDR) ? "RAND_ADDR"  : "");
+        switch (s_hl_mode) {
+            case HL_BLE_SPAM:
+                kon_printf(ks, "Active: BLE spam  %lu adverts  mode=%s  ivl=%lums\r\n",
+                           (unsigned long)ble_spam_svc_count(),
+                           k_ble_spam_mode_names[ble_spam_svc_mode()],
+                           (unsigned long)ble_spam_svc_interval_ms()); break;
+            case HL_BLE_SCAN:
+                kon_printf(ks, "Active: BLE scan  %d devices\r\n",
+                           ble_scan_svc_count()); break;
+            default:
+                kon_printf(ks, "Idle.\r\n"); break;
+        }
+        return 0;
+    }
+
+    const char* sub  = argv[1];
+    const char* verb = (argc >= 3) ? argv[2] : "";
+
+    /* ---- spam ---- */
+    if (bs_stricmp(sub, "spam") == 0) {
+        if (bs_stricmp(verb, "stop") == 0) {
+            if (s_hl_mode == HL_BLE_SPAM) { hl_stop(); kon_printf(ks, "BLE spam stopped.\r\n"); }
+            else kon_printf(ks, "Not running.\r\n");
+            return 0;
+        }
+        if (bs_stricmp(verb, "start") == 0) {
+            if (s_hl_mode != HL_IDLE) hl_stop();
+            if (bs_ble_init(s_arch) < 0) { kon_printf(ks, "BLE init failed.\r\n"); return 1; }
+            ble_spam_mode_t mode       = BLE_SPAM_ALL;
+            uint32_t        interval   = 100;
+            for (int i = 3; i < argc - 1; i++) {
+                if (strcmp(argv[i], "--mode") == 0 && i+1 < argc) {
+                    const char* m = argv[i+1];
+                    if      (bs_stricmp(m,"apple")   == 0) mode = BLE_SPAM_APPLE;
+                    else if (bs_stricmp(m,"samsung") == 0) mode = BLE_SPAM_SAMSUNG;
+                    else if (bs_stricmp(m,"google")  == 0) mode = BLE_SPAM_GOOGLE;
+                    else if (bs_stricmp(m,"name")    == 0) mode = BLE_SPAM_NAME;
+                    else if (bs_stricmp(m,"all")     == 0) mode = BLE_SPAM_ALL;
+                    i++;
+                } else if (strcmp(argv[i], "--ivl") == 0 && i+1 < argc) {
+                    int ms = atoi(argv[i+1]);
+                    if (ms > 0) interval = (uint32_t)ms;
+                    i++;
+                }
+            }
+            ble_spam_svc_init(s_arch);
+            ble_spam_svc_start(mode, interval);
+            s_hl_mode        = HL_BLE_SPAM;
+            s_hl_ks          = ks;
+            s_hl_last_report = 0;
+            kon_printf(ks, "BLE spam started (mode=%s  ivl=%lums).\r\n"
+                           "Reports every 5 s.  'ble spam stop' to halt.\r\n",
+                       k_ble_spam_mode_names[mode], (unsigned long)interval);
+            return 0;
+        }
+        kon_printf(ks, "Usage: ble spam start|stop [--mode apple|samsung|google|name|all] [--ivl ms]\r\n");
+        return 0;
+    }
+
+    /* ---- scan ---- */
+    if (bs_stricmp(sub, "scan") == 0) {
+        if (bs_stricmp(verb, "stop") == 0) {
+            if (s_hl_mode == HL_BLE_SCAN) { hl_stop(); kon_printf(ks, "BLE scan stopped.\r\n"); }
+            else kon_printf(ks, "Not running.\r\n");
+            return 0;
+        }
+        if (bs_stricmp(verb, "start") == 0) {
+            if (s_hl_mode != HL_IDLE) hl_stop();
+            if (bs_ble_init(s_arch) < 0) { kon_printf(ks, "BLE init failed.\r\n"); return 1; }
+            ble_scan_svc_init(s_arch);
+            ble_scan_svc_start();
+            s_hl_mode        = HL_BLE_SCAN;
+            s_hl_ks          = ks;
+            s_hl_last_report = 0;
+            s_hl_last_total  = 0;
+            kon_printf(ks, "BLE scan started.\r\n"
+                           "Reports every 3 s.  'ble scan stop' to halt.\r\n");
+            return 0;
+        }
+        kon_printf(ks, "Usage: ble scan start|stop\r\n");
+        return 0;
+    }
+
+    kon_printf(ks, "Usage: ble spam|scan start|stop [...]\r\n");
+    return 0;
+}
+#endif /* BS_HAS_BLE */
+
+/* ---- 'opts' command ---------------------------------------------------- */
+/*
+ * opts                     - list all current settings
+ * opts <key> <value>       - set a setting
+ * opts save                - persist settings to FS
+ * opts sdinfo              - show SD card status
+ * opts sdformat [yes]      - format SD card (replaces top-level sdformat)
+ *
+ * Keys: text_scale  brightness  layout  palette  border  voltage  header_brand
+ */
+
+/* Palette / border names come from bs_theme — declare enough for lookup */
+static int cmd_opts(struct konsole* ks, int argc, char** argv) {
+    /* opts sdinfo */
+    if (argc >= 2 && bs_stricmp(argv[1], "sdinfo") == 0) {
+        if (bs_fs_available()) {
+            long log_sz = bs_fs_file_size("system.log");
+            if (log_sz >= 0)
+                kon_printf(ks, "SD: mounted  log=%ld B\r\n", log_sz);
+            else
+                kon_printf(ks, "SD: mounted\r\n");
+        } else {
+#ifdef BS_FS_SDCARD
+            const char* e = bs_fs_init_error();
+            kon_printf(ks, "SD: not mounted  (%s)\r\n", e ? e : "unknown");
+#else
+            kon_printf(ks, "SD: not configured\r\n");
+#endif
+        }
+        return 0;
+    }
+
+    /* opts sdformat [yes] */
+    if (argc >= 2 && bs_stricmp(argv[1], "sdformat") == 0) {
+        if (argc < 3 || strcmp(argv[2], "yes") != 0) {
+            kon_printf(ks, "WARNING: erases ALL data on the SD card.\r\n");
+            kon_printf(ks, "Run 'opts sdformat yes' to confirm.\r\n");
+            return 0;
+        }
+        kon_printf(ks, "Formatting SD card as FAT32, please wait...\r\n");
+        if (bs_fs_format() == 0) {
+            bs_log_flush_sd();
+            kon_printf(ks, "Done - SD formatted and mounted.\r\n");
+        } else {
+            const char* e = bs_fs_init_error();
+            kon_printf(ks, "Failed: %s\r\n", e ? e : "unknown error");
+        }
+        return 0;
+    }
+
+    /* opts save */
+    if (argc >= 2 && bs_stricmp(argv[1], "save") == 0) {
+        if (!bs_fs_available()) {
+            kon_printf(ks, "No storage available — settings not saved.\r\n");
+            return 1;
+        }
+        char buf[256];
+        float ts = bs_ui_text_scale();
+        int n = snprintf(buf, sizeof buf,
+            "layout=%d\ntext_scale=%.1f\nbrightness=%d\nshow_voltage=%d\n"
+            "header_brand=%d\ngrid_cols=%d\ngrid_rows=%d\n",
+            (int)bs_menu_get_mode(), (double)ts, bs_ui_brightness(),
+            (int)bs_ui_show_voltage(),
+            bs_ui_header_brand_mode(), bs_ui_grid_max_cols(), bs_ui_grid_max_rows());
+        bs_fs_write_file("settings.cfg", buf, (size_t)n);
+        kon_printf(ks, "Settings saved.\r\n");
+        return 0;
+    }
+
+    /* opts <key> <value>  — set a setting live */
+    if (argc >= 3) {
+        const char* key = argv[1];
+        const char* val = argv[2];
+
+        if (bs_stricmp(key, "text_scale") == 0) {
+            float f = (float)atof(val);
+            if (f < 1.0f || f > 3.0f) {
+                /* Accept names */
+                if      (bs_stricmp(val,"small")  == 0) f = 1.0f;
+                else if (bs_stricmp(val,"mid-s")  == 0) f = 1.5f;
+                else if (bs_stricmp(val,"medium") == 0) f = 2.0f;
+                else if (bs_stricmp(val,"mid-l")  == 0) f = 2.5f;
+                else if (bs_stricmp(val,"large")  == 0) f = 3.0f;
+                else { kon_printf(ks, "text_scale: small|mid-s|medium|mid-l|large or 1.0-3.0\r\n"); return 1; }
+            }
+            bs_ui_set_text_scale(f);
+            kon_printf(ks, "text_scale=%.1f\r\n", (double)bs_ui_text_scale());
+            return 0;
+        }
+        if (bs_stricmp(key, "brightness") == 0) {
+            int pct = atoi(val);
+            bs_ui_set_brightness(pct);
+            kon_printf(ks, "brightness=%d%%\r\n", bs_ui_brightness());
+            return 0;
+        }
+        if (bs_stricmp(key, "layout") == 0) {
+            int idx = -1;
+            if      (bs_stricmp(val,"auto")      == 0) idx = 0;
+            else if (bs_stricmp(val,"grid")      == 0) idx = 1;
+            else if (bs_stricmp(val,"slideshow") == 0) idx = 2;
+            else if (bs_stricmp(val,"list")      == 0) idx = 3;
+            else idx = atoi(val);
+            if (idx < 0 || idx > 3) { kon_printf(ks, "layout: auto|grid|slideshow|list or 0-3\r\n"); return 1; }
+            bs_menu_set_mode((bs_menu_mode_t)idx);
+            kon_printf(ks, "layout=%d\r\n", idx);
+            return 0;
+        }
+        if (bs_stricmp(key, "voltage") == 0) {
+            bool on = (bs_stricmp(val,"on")==0 || strcmp(val,"1")==0);
+            bs_ui_set_show_voltage(on);
+            kon_printf(ks, "voltage=%s\r\n", on ? "on" : "off");
+            return 0;
+        }
+        if (bs_stricmp(key, "header_brand") == 0) {
+            int mode = -1;
+            if      (bs_stricmp(val, "text") == 0) mode = 0;
+            else if (bs_stricmp(val, "logo") == 0) mode = 1;
+            else mode = atoi(val);
+            bs_ui_set_header_brand_mode(mode);
+            bs_menu_invalidate();
+            kon_printf(ks, "header_brand=%s\r\n", bs_ui_header_brand_mode() ? "logo" : "text");
+            return 0;
+        }
+        if (bs_stricmp(key, "grid_cols") == 0) {
+            bs_ui_set_grid_max_cols(atoi(val));
+            kon_printf(ks, "grid_cols=%d\r\n", bs_ui_grid_max_cols());
+            return 0;
+        }
+        if (bs_stricmp(key, "grid_rows") == 0) {
+            bs_ui_set_grid_max_rows(atoi(val));
+            kon_printf(ks, "grid_rows=%d\r\n", bs_ui_grid_max_rows());
+            return 0;
+        }
+        kon_printf(ks, "Unknown key '%s'.\r\n", key);
+        kon_printf(ks, "Keys: text_scale brightness layout voltage header_brand grid_cols grid_rows\r\n");
+        return 1;
+    }
+
+    /* opts — list all current settings */
+    static const char* const k_scale_names[]  = {"Small","Mid-S","Medium","Mid-L","Large"};
+    static const float        k_scale_vals[]   = {1.0f, 1.5f, 2.0f, 2.5f, 3.0f};
+    static const char* const k_layout_names[] = {"Auto","Grid","Slideshow","List"};
+    float ts  = bs_ui_text_scale();
+    int   lm  = (int)bs_menu_get_mode();
+    const char* ts_name = "?";
+    for (int i = 0; i < 5; i++)
+        if (k_scale_vals[i] == ts) { ts_name = k_scale_names[i]; break; }
+
+    kon_printf(ks, "Settings:\r\n");
+    kon_printf(ks, "  text_scale  = %.1f (%s)\r\n", (double)ts, ts_name);
+    kon_printf(ks, "  brightness  = %d%%\r\n", bs_ui_brightness());
+    kon_printf(ks, "  layout      = %d (%s)\r\n", lm,
+               lm >= 0 && lm <= 3 ? k_layout_names[lm] : "?");
+    kon_printf(ks, "  voltage     = %s\r\n", bs_ui_show_voltage() ? "on" : "off");
+    kon_printf(ks, "  header_brand= %s\r\n", bs_ui_header_brand_mode() ? "logo" : "text");
+    kon_printf(ks, "  grid_cols   = %d\r\n", bs_ui_grid_max_cols());
+    kon_printf(ks, "  grid_rows   = %d\r\n", bs_ui_grid_max_rows());
+    kon_printf(ks, "  firmware    = " BS_FW_NAME " v" BS_VERSION "\r\n");
+    if (bs_fs_available())
+        kon_printf(ks, "  sd          = mounted\r\n");
+    else
+        kon_printf(ks, "  sd          = not mounted\r\n");
+    kon_printf(ks, "Use 'opts <key> <value>' to change.  'opts save' to persist.\r\n");
+    kon_printf(ks, "Use 'opts sdinfo' for SD details, 'opts sdformat yes' to erase+format.\r\n");
+    return 0;
+}
+
 static const struct kon_cmd k_cmds[] = {
     { "help",         "show commands",              cmd_help         },
     { "hw",           "hardware & system status",   cmd_hw           },
     { "dmesg",        "show log (dmesg flush->SD)", cmd_dmesg        },
     { "sdformat",     "format SD card as FAT32",    cmd_sdformat     },
+    { "opts",         "show/set settings (opts sdinfo|sdformat)",  cmd_opts },
     { "startapp",     "launch app by name",         cmd_startapp     },
+#ifdef BS_HAS_WIFI
+    { "wifi",  "wifi beacon|deauth|sniff start|stop [options]", cmd_wifi  },
+#endif
+#ifdef BS_HAS_BLE
+    { "ble",   "ble spam|scan start|stop [options]",            cmd_ble   },
+#endif
 };
 
 /* ---- bs_init ---------------------------------------------------------- */
@@ -395,6 +999,7 @@ void bs_init(void) {
 void bs_run(void) {
 #ifdef BS_HEADLESS
     konsole_poll(&g_ks);
+    hl_tick();
     s_arch->delay_ms(1);
 #else
     const bs_app_t* app = bs_menu_run(s_arch);

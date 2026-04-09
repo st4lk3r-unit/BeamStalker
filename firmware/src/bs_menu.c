@@ -150,7 +150,7 @@ static int s_bat_frames = 0;
 
 static void draw_header(void) {
     int sw  = bs_gfx_width();
-    int ts  = bs_ui_text_scale();
+    float ts = bs_ui_text_scale();
     int hh  = bs_ui_header_h();
     int ty  = (hh - bs_gfx_text_h(ts)) / 2;
     int ih  = bs_gfx_text_h(ts);
@@ -202,12 +202,27 @@ static void draw_header(void) {
         }
     }
 
-    /* --- Left side title - downscale if it would overlap status icons --- */
-    int title_ts = ts;
-    while (title_ts > 1 && 8 + bs_gfx_text_w("BeamStalker", title_ts) > rx - 8)
-        title_ts--;
-    bs_gfx_text(8, (hh - bs_gfx_text_h(title_ts)) / 2, "BeamStalker",
-                g_bs_theme.dim, title_ts);
+    /* --- Left side title / logo --- */
+    if (bs_ui_header_brand_mode() != 0) {
+        int max_w = rx - 12;
+        int max_h = hh - 4;
+        if (max_w > 8 && max_h > 4) {
+            int step_w = (120 + max_w - 1) / max_w;
+            int step_h = (120 + max_h - 1) / max_h;
+            int step   = step_w > step_h ? step_w : step_h;
+            if (step < 1) step = 1;
+            int out_h = (120 + step - 1) / step;
+            int ox = 8;
+            int oy = (hh - out_h) / 2;
+            bs_gfx_bitmap_1bpp(ox, oy, 120, 120, bs_skull_120, g_bs_theme.dim, 1, step);
+        }
+    } else {
+        float title_ts = ts;
+        while (title_ts > 1.0f && 8 + bs_gfx_text_w("BeamStalker", title_ts) > rx - 8)
+            title_ts -= 0.5f;
+        bs_gfx_text(8, (hh - bs_gfx_text_h(title_ts)) / 2, "BeamStalker",
+                    g_bs_theme.dim, title_ts);
+    }
 
     bs_gfx_hline(0, hh - 1, sw, g_bs_theme.dim);
 }
@@ -218,7 +233,7 @@ static void draw_grid(void) {
     int sw  = bs_gfx_width();
     int sh  = bs_gfx_height();
     int hh  = bs_ui_header_h();
-    int ns  = bs_ui_text_scale(); if (ns > 2) ns = 2;
+    float ns = bs_ui_text_scale(); if (ns > 2.0f) ns = 2.0f;
     int nh  = bs_gfx_text_h(ns);
 
     int cols       = grid_cols();
@@ -302,11 +317,17 @@ static void draw_grid(void) {
             bs_gfx_border(px, py, ps, ps, border_col, BS_BORDER_SHARP);
         }
 
-        /* Name centered at the bottom of the card */
+        /* Name at the bottom of the card.
+         * Center it when it fits; fall back to carousel clipping when it does not. */
         int name_y = card_y + card_h - nh - 4;
-        int nw     = bs_gfx_text_w(app->name, ns);
-        int name_x = card_x + (card_w - nw) / 2;
-        bs_gfx_text(name_x, name_y, app->name, name_col, ns);
+        int name_w = card_w - 4;
+        int text_w = bs_gfx_text_w(app->name, ns);
+        if (text_w <= name_w) {
+            int name_x = card_x + (card_w - text_w) / 2;
+            bs_gfx_text(name_x, name_y, app->name, name_col, ns);
+        } else {
+            bs_ui_draw_text_box(card_x + 2, name_y, name_w, app->name, name_col, ns, selected);
+        }
     }
 
     /* Row scroll indicator: tiny dots bottom-right when rows overflow */
@@ -329,7 +350,7 @@ static void draw_slideshow(void) {
     int sw  = bs_gfx_width();
     int sh  = bs_gfx_height();
     int hh  = bs_ui_header_h();
-    int ts  = bs_ui_text_scale();
+    float ts = bs_ui_text_scale();
     int name_spare  = bs_gfx_text_h(ts) + 8;
     int page_ind_h  = bs_gfx_text_h(ts) + 6;  /* "N / Total" indicator at bottom */
 
@@ -357,10 +378,9 @@ static void draw_slideshow(void) {
                            app->icon, g_bs_theme.primary, scale, step);
 
         /* Name below icon */
-        int name_w = bs_gfx_text_w(app->name, ts);
-        int name_x = (sw - name_w) / 2;
         int name_y = oy + rendered_h * scale + 6;
-        bs_gfx_text(name_x, name_y, app->name, g_bs_theme.primary, ts);
+        int nbox_w = sw - 16;
+        bs_ui_draw_text_box(8, name_y, nbox_w, app->name, g_bs_theme.primary, ts, true);
     } else {
         /* Placeholder box */
         int box = target;
@@ -369,10 +389,9 @@ static void draw_slideshow(void) {
         if (oy < hh) oy = hh;
         bs_gfx_border(ox, oy, box, box, g_bs_theme.dim, g_bs_theme.border);
 
-        int name_w = bs_gfx_text_w(app->name, ts);
-        int name_x = (sw - name_w) / 2;
         int name_y = oy + box + 6;
-        bs_gfx_text(name_x, name_y, app->name, g_bs_theme.primary, ts);
+        int nbox_w = sw - 16;
+        bs_ui_draw_text_box(8, name_y, nbox_w, app->name, g_bs_theme.primary, ts, true);
     }
 
     /* Left / right arrows */
@@ -382,11 +401,11 @@ static void draw_slideshow(void) {
     bs_gfx_text(4, mid_y, "<", left_col, ts);
     bs_gfx_text(sw - bs_gfx_text_w(">", ts) - 4, mid_y, ">", right_col, ts);
 
-    /* Page indicator */
+    /* Page indicator — bottom-right corner */
     char page_buf[16];
-    snprintf(page_buf, sizeof page_buf, "%d / %d", (int)s_cursor + 1, (int)s_count);
+    snprintf(page_buf, sizeof page_buf, "%d/%d", (int)s_cursor + 1, (int)s_count);
     int pw = bs_gfx_text_w(page_buf, ts);
-    bs_gfx_text((sw - pw) / 2, sh - bs_gfx_text_h(ts) - 3, page_buf, g_bs_theme.dim, ts);
+    bs_gfx_text(sw - pw - 4, sh - bs_gfx_text_h(ts) - 3, page_buf, g_bs_theme.dim, ts);
 }
 
 /* ---- LIST ------------------------------------------------------------- */
@@ -395,7 +414,7 @@ static void draw_list(void) {
     int sw = bs_gfx_width();
     int sh = bs_gfx_height();
 
-    int ts        = bs_ui_text_scale();
+    float ts      = bs_ui_text_scale();
     int row_h     = bs_gfx_text_h(ts) + 4;
     int start_y   = bs_ui_header_h();
     int visible   = (sh - start_y) / row_h;
@@ -419,7 +438,7 @@ static void draw_list(void) {
         }
 
         bs_color_t tc = selected ? g_bs_theme.primary : g_bs_theme.secondary;
-        bs_gfx_text(6, row_y + 2, app->name, tc, ts);
+        bs_ui_draw_text_box(6, row_y + 2, sw - 12, app->name, tc, ts, selected);
     }
 }
 
@@ -450,49 +469,70 @@ void bs_menu_init(const bs_app_t* const* apps, size_t count,
 const bs_app_t* bs_menu_run(const bs_arch_t* arch) {
     s_dirty = true;
     s_grid_scroll = 0;
+
+    uint32_t prev_ms      = arch->millis();
+    uint32_t last_anim_ms = prev_ms;
+
     while (true) {
-        if (s_dirty) {
+        uint32_t now = arch->millis();
+        uint32_t dt  = now - prev_ms;
+        prev_ms = now;
+        bs_ui_advance_ms(dt);
+
+        if (s_idle) s_idle();
+
+        bs_nav_id_t nav;
+        while ((nav = bs_nav_poll()) != BS_NAV_NONE) {
+            switch (nav) {
+                case BS_NAV_NEXT:
+                case BS_NAV_RIGHT:
+                    s_cursor = (s_cursor + 1) % s_count;
+                    s_dirty = true;
+                    break;
+                case BS_NAV_PREV:
+                case BS_NAV_LEFT:
+                    s_cursor = (s_cursor + s_count - 1) % s_count;
+                    s_dirty = true;
+                    break;
+                case BS_NAV_DOWN:
+                    /* Step by 1 in all modes: the encoder knob produces UP/DOWN and
+                     * must be able to reach every item, including columns > 0. */
+                    s_cursor = (s_cursor + 1) % s_count;
+                    s_dirty = true;
+                    break;
+                case BS_NAV_UP:
+                    s_cursor = (s_cursor + s_count - 1) % s_count;
+                    s_dirty = true;
+                    break;
+                case BS_NAV_SELECT: {
+                    /* Wait for encoder/button release, flush stale events */
+                    arch->delay_ms(120);
+                    { bs_key_t _k; while (bs_keys_poll(&_k)) {} }
+                    return s_apps[s_cursor];
+                }
+                default:
+                    break;
+            }
+        }
+
+        /* Full-screen redraws on the T-Pager are expensive enough to make the
+         * rotary encoder feel lossy if we do them every loop.  Redraw on input,
+         * and only refresh periodically to advance any marquee/carousel text. */
+        bool anim_due = bs_ui_carousel_enabled() && (uint32_t)(now - last_anim_ms) >= 100U;
+        if (s_dirty || anim_due) {
             bs_gfx_clear(g_bs_theme.bg);
             draw_menu_by_mode();
             bs_debug_frame();
             bs_gfx_present();
             s_dirty = false;
+            if (anim_due) last_anim_ms = now;
         }
 
-        arch->delay_ms(5);    /* ~200 Hz poll - also throttles encoder */
-        bs_nav_id_t nav = bs_nav_poll();
-        if (s_idle) s_idle();
-
-        switch (nav) {
-            case BS_NAV_NEXT:
-            case BS_NAV_RIGHT:
-                s_cursor = (s_cursor + 1) % s_count;
-                s_dirty = true;
-                break;
-            case BS_NAV_PREV:
-            case BS_NAV_LEFT:
-                s_cursor = (s_cursor + s_count - 1) % s_count;
-                s_dirty = true;
-                break;
-            case BS_NAV_DOWN:
-                /* Step by 1 in all modes: the encoder knob produces UP/DOWN and
-                 * must be able to reach every item, including columns > 0. */
-                s_cursor = (s_cursor + 1) % s_count;
-                s_dirty = true;
-                break;
-            case BS_NAV_UP:
-                s_cursor = (s_cursor + s_count - 1) % s_count;
-                s_dirty = true;
-                break;
-            case BS_NAV_SELECT: {
-                /* Wait for encoder/button release, flush stale events */
-                arch->delay_ms(120);
-                { bs_key_t _k; while (bs_keys_poll(&_k)) {} }
-                return s_apps[s_cursor];
-            }
-            default:
-                break;
-        }
+#if defined(VARIANT_TPAGER)
+        arch->delay_ms(1);
+#else
+        arch->delay_ms(2);
+#endif
     }
 }
 

@@ -1,5 +1,5 @@
 /*
- * wifi_honeypot.cpp - Rogue AP / honeypot sub-application.
+ * wifi_honeypot.c - Rogue AP / honeypot sub-application.
  *
  * Flow:
  *   MODE    - choose attack style:
@@ -22,14 +22,12 @@
 
 #include "wifi_honeypot.h"
 
-extern "C" {
 #include "bs/bs_wifi.h"
 #include "bs/bs_gfx.h"
 #include "bs/bs_nav.h"
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 #include "bs/bs_arch.h"
-}
 
 #include "esp_wifi.h"
 
@@ -193,8 +191,8 @@ static void inject_lure(void) {
 /* ── Draw ────────────────────────────────────────────────────────────────── */
 
 static void draw_mode(void) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
     int sw  = bs_gfx_width();
     int cy  = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts) + bs_gfx_text_h(ts2) + 10;
@@ -216,8 +214,8 @@ static void draw_mode(void) {
         if (sel) bs_gfx_fill_rect(0, y - 2, sw, lh - 1, g_bs_theme.dim);
         bs_color_t nc = sel ? g_bs_theme.accent  : g_bs_theme.primary;
         bs_color_t dc = sel ? g_bs_theme.primary : g_bs_theme.dim;
-        bs_gfx_text(8, y,                          names[i], nc, ts);
-        bs_gfx_text(8, y + bs_gfx_text_h(ts) + 2, descs[i], dc, ts2);
+        bs_ui_draw_text_box(8, y,                          sw - 16, names[i], nc, ts,  sel);
+        bs_ui_draw_text_box(8, y + bs_gfx_text_h(ts) + 2, sw - 16, descs[i], dc, ts2, sel);
     }
 
     bs_ui_draw_hint("UP/DN=mode  SELECT=next  BACK=exit");
@@ -244,8 +242,8 @@ static void draw_scan(bool scanning) {
 }
 
 static void draw_select(void) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
     int sw  = bs_gfx_width();
     int cy  = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts) + bs_gfx_text_h(ts2) + 6;
@@ -277,8 +275,8 @@ static void draw_select(void) {
         snprintf(info, sizeof(info), "ch%-2d  %4d dBm",
                  s_aps[idx].channel, s_aps[idx].rssi);
 
-        bs_gfx_text(8, y,                          ssid, nc, ts);
-        bs_gfx_text(8, y + bs_gfx_text_h(ts) + 1, info, dc, ts2);
+        bs_ui_draw_text_box(8, y,                          sw - 16, ssid, nc, ts,  sel);
+        bs_ui_draw_text_box(8, y + bs_gfx_text_h(ts) + 1, sw - 16, info, dc, ts2, sel);
     }
 
     bs_ui_draw_hint("SELECT=clone  BACK=rescan");
@@ -286,8 +284,9 @@ static void draw_select(void) {
 }
 
 static void draw_sniff(uint32_t elapsed) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
+    int sw  = bs_gfx_width();
     int y   = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts)  + 4;
     int lh2 = bs_gfx_text_h(ts2) + 3;
@@ -296,12 +295,12 @@ static void draw_sniff(uint32_t elapsed) {
     bs_ui_draw_header("Honeypot / Scanning Clients");
 
     const char* ssid = s_target_ssid[0] ? s_target_ssid : "(hidden)";
-    bs_gfx_text(8, y, ssid, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, y, sw - 16, ssid, g_bs_theme.accent, ts, true);
     y += lh;
 
     char buf[48];
     snprintf(buf, sizeof(buf), "ch%d  — listening for clients", s_target_ch);
-    bs_gfx_text(8, y, buf, g_bs_theme.primary, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
     y += lh2 + 6;
 
     /* Progress bar */
@@ -323,8 +322,9 @@ static void draw_sniff(uint32_t elapsed) {
 }
 
 static void draw_running(uint32_t now) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
+    int sw  = bs_gfx_width();
     int y   = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts)  + 4;
     int lh2 = bs_gfx_text_h(ts2) + 3;
@@ -336,33 +336,31 @@ static void draw_running(uint32_t now) {
     const char* mode_str = (s_attack == HP_BROADCAST) ? "BCAST" : "TGTD";
     snprintf(buf, sizeof(buf), "AP: %.30s  ch%d  [%s]",
              s_target_ssid[0] ? s_target_ssid : "(hidden)", s_hp_ch, mode_str);
-    bs_gfx_text(8, y, buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
-    wifi_sta_list_t sta = {};
+    wifi_sta_list_t sta = (wifi_sta_list_t){0};
     esp_wifi_ap_get_sta_list(&sta);
     snprintf(buf, sizeof(buf), "Clients: %d   IP: 192.168.4.1", sta.num);
-    bs_gfx_text(8, y, buf, g_bs_theme.primary, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
     y += lh2;
 
-    /* Next lure countdown */
     uint32_t since_lure = now - s_lure_last_ms;
     uint32_t next_in    = (since_lure < (uint32_t)HP_LURE_PERIOD_MS)
                           ? (HP_LURE_PERIOD_MS - since_lure) / 1000 : 0;
     snprintf(buf, sizeof(buf), "Next lure: %lus", (unsigned long)next_in);
-    bs_gfx_text(8, y, buf, g_bs_theme.dim, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.dim, ts2, true);
     y += lh2 + 4;
 
-    bs_gfx_fill_rect(4, y, bs_gfx_width() - 8, 1, g_bs_theme.dim);
+    bs_gfx_fill_rect(4, y, sw - 8, 1, g_bs_theme.dim);
     y += 5;
 
     for (int i = 0; i < s_log_count && i < HP_LOG_LINES; i++) {
         int idx = (s_log_head - s_log_count + i + HP_LOG_LINES * 2) % HP_LOG_LINES;
         bs_color_t c = (i == s_log_count - 1) ? g_bs_theme.accent : g_bs_theme.dim;
-        /* Clamp to hint line */
         int line_y = y + i * lh2;
         if (line_y + lh2 > bs_gfx_height() - bs_gfx_text_h(ts2) - 6) break;
-        bs_gfx_text(8, line_y, s_log[idx], c, ts2);
+        bs_ui_draw_text_box(8, line_y, sw - 16, s_log[idx], c, ts2, true);
     }
 
     bs_ui_draw_hint("BACK=stop");
@@ -371,7 +369,7 @@ static void draw_running(uint32_t now) {
 
 /* ── Main entry ──────────────────────────────────────────────────────────── */
 
-extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
+void wifi_honeypot_run(const bs_arch_t* arch) {
     s_phase        = HP_MODE;
     s_attack       = HP_BROADCAST;
     s_ap_count     = 0;
@@ -383,17 +381,21 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
     s_log_count    = 0;
 
     bool dirty     = true;
+    uint32_t last_anim_ms = 0;
     bool scanning  = false;
     uint32_t last_refresh = 0;
 
+    uint32_t prev_ms = arch->millis();
     for (;;) {
         uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
 
         /* ── Portal service (RUNNING) ───────────────────────────────────── */
         if (s_phase == HP_RUNNING && wifi_portal_active()) {
             wifi_portal_poll();
 
-            wifi_sta_list_t sta = {};
+            wifi_sta_list_t sta = (wifi_sta_list_t){0};
             esp_wifi_ap_get_sta_list(&sta);
             if (sta.num > s_prev_clients) {
                 for (int i = s_prev_clients; i < (int)sta.num; i++) {
@@ -402,8 +404,10 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
                            sta.sta[i].mac[1],
                            sta.sta[i].mac[2]);
                 }
+                dirty = true;
             } else if (sta.num < s_prev_clients) {
                 hp_log("Client disconnected");
+                dirty = true;
             }
             s_prev_clients = sta.num;
 
@@ -415,7 +419,7 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
                 /* Brief AP pause to inject on target channel */
                 wifi_portal_stop();
                 inject_lure();
-                wifi_portal_start(s_target_ssid, s_hp_ch);
+                wifi_portal_start(s_target_ssid, s_hp_ch, NULL);
                 hp_log("Lure done, AP back on ch%d", s_hp_ch);
                 dirty = true;
             }
@@ -439,7 +443,7 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
                 bs_wifi_monitor_stop();
                 hp_log("Found %d client(s)", s_client_count);
                 /* Start AP and enter RUNNING */
-                if (wifi_portal_start(s_target_ssid, s_hp_ch)) {
+                if (wifi_portal_start(s_target_ssid, s_hp_ch, NULL)) {
                     hp_log("AP up ch%d  IP: 192.168.4.1", s_hp_ch);
                     s_lure_last_ms = now;
                     s_phase        = HP_RUNNING;
@@ -512,7 +516,7 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
                         s_phase = HP_SNIFF;
                     } else {
                         /* Broadcast: start AP immediately */
-                        if (wifi_portal_start(s_target_ssid, s_hp_ch)) {
+                        if (wifi_portal_start(s_target_ssid, s_hp_ch, NULL)) {
                             hp_log("AP up ch%d  IP: 192.168.4.1", s_hp_ch);
                             s_lure_last_ms = now;
                             s_phase        = HP_RUNNING;
@@ -537,7 +541,7 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
                     /* Skip remaining sniff, start AP now */
                     bs_wifi_monitor_stop();
                     hp_log("Sniff skipped, %d client(s)", s_client_count);
-                    if (wifi_portal_start(s_target_ssid, s_hp_ch)) {
+                    if (wifi_portal_start(s_target_ssid, s_hp_ch, NULL)) {
                         hp_log("AP up ch%d  IP: 192.168.4.1", s_hp_ch);
                         s_lure_last_ms = now;
                         s_phase        = HP_RUNNING;
@@ -560,8 +564,12 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
             }
         }
 
+        bool anim_due = (s_phase == HP_SELECT || s_phase == HP_SNIFF || s_phase == HP_RUNNING)
+                     && bs_ui_carousel_enabled()
+                     && (uint32_t)(now - last_anim_ms) >= 80U;
+
         /* ── Draw ───────────────────────────────────────────────────────── */
-        if (dirty) {
+        if (dirty || anim_due) {
             dirty = false;
             uint32_t elapsed = (s_phase == HP_SNIFF && s_sniff_start_ms)
                                ? (now - s_sniff_start_ms) : 0;
@@ -572,14 +580,19 @@ extern "C" void wifi_honeypot_run(const bs_arch_t* arch) {
             case HP_SNIFF:   draw_sniff(elapsed);  break;
             case HP_RUNNING: draw_running(now);    break;
             }
+            if (anim_due) last_anim_ms = now;
         }
 
         if (s_phase == HP_RUNNING && (now - last_refresh) >= (uint32_t)HP_REFRESH_MS) {
             last_refresh = now;
-            draw_running(now);
+            dirty = true;
         }
 
+#if defined(VARIANT_TPAGER)
+        arch->delay_ms(s_phase == HP_RUNNING ? 2 : 1);
+#else
         arch->delay_ms(s_phase == HP_RUNNING ? 10 : 5);
+#endif
     }
 }
 

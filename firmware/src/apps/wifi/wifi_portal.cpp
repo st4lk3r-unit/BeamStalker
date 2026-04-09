@@ -145,7 +145,7 @@ static void on_ok(void) {
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
-bool wifi_portal_start(const char* ssid, uint8_t channel, const char* password) {
+extern "C" bool wifi_portal_start(const char* ssid, uint8_t channel, const char* password) {
     if (s_active) return true;
 
     /* Exit any prior monitor/sniff mode */
@@ -230,7 +230,7 @@ bool wifi_portal_start(const char* ssid, uint8_t channel, const char* password) 
     return true;
 }
 
-void wifi_portal_stop(void) {
+extern "C" void wifi_portal_stop(void) {
     if (!s_active) return;
     s_server.stop();
     s_dns.stop();
@@ -241,29 +241,29 @@ void wifi_portal_stop(void) {
     s_active = false;
 }
 
-void wifi_portal_poll(void) {
+extern "C" void wifi_portal_poll(void) {
     if (!s_active) return;
     s_dns.processNextRequest();
     s_server.handleClient();
 }
 
-int wifi_portal_client_count(void) {
+extern "C" int wifi_portal_client_count(void) {
     if (!s_active) return 0;
     wifi_sta_list_t sta = {};
     esp_wifi_ap_get_sta_list(&sta);
     return (int)sta.num;
 }
 
-bool wifi_portal_active(void) { return s_active; }
+extern "C" bool wifi_portal_active(void) { return s_active; }
 
-int wifi_portal_cred_count(void) { return s_cred_count; }
+extern "C" int wifi_portal_cred_count(void) { return s_cred_count; }
 
-const wifi_portal_cred_t* wifi_portal_get_cred(int idx) {
-    if (idx < 0 || idx >= s_cred_count) return nullptr;
+extern "C" const wifi_portal_cred_t* wifi_portal_get_cred(int idx) {
+    if (idx < 0 || idx >= s_cred_count) return NULL;
     return &s_creds[idx];
 }
 
-void wifi_portal_cred_clear(void) { s_cred_count = 0; }
+extern "C" void wifi_portal_cred_clear(void) { s_cred_count = 0; }
 
 #endif /* ARDUINO_ARCH_ESP32 */
 #endif /* BS_WIFI_ESP32 */

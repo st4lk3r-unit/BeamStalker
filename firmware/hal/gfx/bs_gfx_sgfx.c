@@ -38,6 +38,9 @@ static sgfx_present_t s_pr;
 static int            s_w, s_h;
 static bool           s_ready = false;
 
+/* Clip rectangle — (0,0,0,0) = disabled */
+static int s_clip_x, s_clip_y, s_clip_w, s_clip_h;
+
 #if defined(VARIANT_CARDPUTER)
 static void bs_cardputer_panel_fixup(void) {
     if (!s_dev.bus || !s_dev.bus->ops || !s_dev.bus->ops->write_cmd) return;
@@ -55,6 +58,15 @@ static inline uint16_t pack565(bs_color_t c) {
 
 static void fb_fill(int x, int y, int w, int h, bs_color_t c) {
     if (!s_fb.px || w <= 0 || h <= 0) return;
+    /* Apply clip rect if active */
+    if (s_clip_w > 0 && s_clip_h > 0) {
+        int cx2 = s_clip_x + s_clip_w, cy2 = s_clip_y + s_clip_h;
+        if (x < s_clip_x) { w -= (s_clip_x - x); x = s_clip_x; }
+        if (y < s_clip_y) { h -= (s_clip_y - y); y = s_clip_y; }
+        if (x + w > cx2)  w = cx2 - x;
+        if (y + h > cy2)  h = cy2 - y;
+        if (w <= 0 || h <= 0) return;
+    }
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (x + w > s_w) w = s_w - x;
@@ -76,18 +88,28 @@ static void fb_clear_all(bs_color_t c) {
 /* ---- 5×7 text into framebuffer --------------------------------------- */
 
 /*
- * Each glyph: 5 columns, 7 rows.  advance = 6 px (5 + 1 gap).
- * scale multiplies both axes.  Renders into FB pixel buffer directly.
+ * Each glyph: 5 columns, 7 rows.  advance = ceil(6 * scale) px.
+ * Fractional scale (e.g. 1.5) renders each font pixel as a rectangle
+ * whose size is determined by the next-pixel-boundary method — pixels
+ * alternate between 1px and 2px so no gaps or overlaps occur.
  */
-static void fb_text5x7(int x, int y, const char* s, bs_color_t c, int scale) {
-    if (!s_fb.px || !s || scale < 1) return;
-    for (; *s; ++s, x += 6 * scale) {
+static void fb_text5x7(int x0, int y0, const char* s, bs_color_t c, float scale) {
+    if (!s_fb.px || !s || scale < 0.5f) return;
+    int adv = (int)(6.0f * scale);
+    if (adv < 1) adv = 1;
+    for (; *s; ++s, x0 += adv) {
         uint8_t cols[5];
         if (!sgfx_font5x7_get(*s, cols)) continue;
         for (int col = 0; col < 5; col++) {
+            int px = x0 + (int)((float)col * scale);
+            int pw = (int)((float)(col + 1) * scale) - (int)((float)col * scale);
+            if (pw < 1) pw = 1;
             for (int row = 0; row < 7; row++) {
                 if (cols[col] & (uint8_t)(1u << row)) {
-                    fb_fill(x + col * scale, y + row * scale, scale, scale, c);
+                    int py = y0 + (int)((float)row * scale);
+                    int ph = (int)((float)(row + 1) * scale) - (int)((float)row * scale);
+                    if (ph < 1) ph = 1;
+                    fb_fill(px, py, pw, ph, c);
                 }
             }
         }
@@ -174,26 +196,34 @@ void bs_gfx_bitmap_1bpp(int x, int y, int w, int h,
     }
 }
 
-void bs_gfx_text(int x, int y, const char* s, bs_color_t c, int scale) {
+void bs_gfx_text(int x, int y, const char* s, bs_color_t c, float scale) {
     if (!s_ready) return;
-    if (scale < 1) scale = 1;
+    if (scale < 0.5f) scale = 0.5f;
     fb_text5x7(x, y, s, c, scale);
 }
 
-int bs_gfx_text_w(const char* s, int scale) {
-    if (!s || scale < 1) return 0;
+int bs_gfx_text_w(const char* s, float scale) {
+    if (!s || scale < 0.5f) return 0;
     int n = 0;
     while (*s++) n++;
-    return n * 6 * scale;   /* 5px glyph + 1px gap per char */
+    return (int)((float)n * 6.0f * scale);
 }
 
-int bs_gfx_text_h(int scale) {
-    return 7 * (scale < 1 ? 1 : scale);
+int bs_gfx_text_h(float scale) {
+    return (int)(7.0f * (scale < 1.0f ? 1.0f : scale));
 }
+
+void bs_gfx_clip(int x, int y, int w, int h) {
+    s_clip_x = x; s_clip_y = y; s_clip_w = w; s_clip_h = h;
+}
+
+/* Weak reference — bs_ui.c provides the strong version for carousel animation */
+__attribute__((weak)) void bs_ui_tick(void) {}
 
 void bs_gfx_present(void) {
     if (!s_ready) return;
     sgfx_present_frame(&s_pr, &s_dev, &s_fb);
+    bs_ui_tick();
 }
 
 /*
