@@ -5,8 +5,9 @@
  * Normalises input across platforms:
  *   BS_KEYS_NATIVE : raw stdin (native Linux)
  *   BS_KEYS_SIC    : TCA8418 keyboard + rotary encoder (hardware via SIC)
+ *   BS_KEYS_GPIO   : minimal GPIO-backed button input (single-button boards)
  *
- * bs_keys_poll() is non-blocking.  Call it every loop iteration.
+ * bs_keys_poll() is non-blocking. Call it every loop iteration.
  */
 #include <stdint.h>
 #include <stdbool.h>

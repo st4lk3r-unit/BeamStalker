@@ -368,7 +368,7 @@ void wifi_captive_run(const bs_arch_t* arch) {
             dirty = true;
         }
 
-#if defined(VARIANT_TPAGER)
+#if defined(VARIANT_TPAGER) || defined(VARIANT_TDONGLE_S3)
         arch->delay_ms(s_phase == CP_RUNNING ? 2 : 1);
 #else
         arch->delay_ms(s_phase == CP_RUNNING ? 10 : 5);
