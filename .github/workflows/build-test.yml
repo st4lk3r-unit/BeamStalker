@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [esp32s3-tpager, native, native-headless, esp32s3-cardputer]
+        env: [esp32s3-tpager, native, native-headless, esp32s3-cardputer, esp32s3-tdongle-s3]
 
     steps:
       - name: Checkout (with submodules)
