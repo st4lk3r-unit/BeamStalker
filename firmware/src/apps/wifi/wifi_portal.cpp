@@ -215,5 +215,18 @@ extern "C" const wifi_portal_cred_t* wifi_portal_get_cred(int idx) {
 
 extern "C" void wifi_portal_cred_clear(void) { s_cred_count = 0; }
 
+extern "C" void wifi_portal_get_bssid(uint8_t mac[6]) {
+    if (!mac) return;
+    if (!s_active) { memset(mac, 0, 6); return; }
+    String bssid = WiFi.softAPmacAddress();
+    int v[6] = {0};
+    if (sscanf(bssid.c_str(), "%x:%x:%x:%x:%x:%x",
+               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) == 6) {
+        for (int i = 0; i < 6; i++) mac[i] = (uint8_t)v[i];
+    } else {
+        memset(mac, 0, 6);
+    }
+}
+
 #endif /* ARDUINO_ARCH_ESP32 */
 #endif /* BS_WIFI_ESP32 */

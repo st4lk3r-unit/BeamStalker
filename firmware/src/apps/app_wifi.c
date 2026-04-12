@@ -5,6 +5,11 @@
  *   [0] Beacon Spam  — flood the air with 802.11 beacons
  *   [1] Deauther     — deauth clients from selected APs
  *   [2] Sniffer      — promiscuous capture to PCAP on SD
+ *   [3] EAPOL        — WPA2 handshake capture (+ optional deauth)
+ *   [4] Honeypot     — clone AP; serve captive portal
+ *   [5] Karma        — mirror probe SSIDs; lure clients
+ *   [6] Evil Twin    — clone AP + deauth + portal
+ *   [7] Cap. Portal  — manual rogue AP + portal
  */
 #include "bs/bs_wifi.h"   /* must come first — defines BS_HAS_WIFI */
 #ifdef BS_HAS_WIFI
@@ -17,6 +22,7 @@
 #include "apps/wifi/wifi_karma.h"
 #include "apps/wifi/wifi_captive.h"
 #include "apps/wifi/wifi_eviltwin.h"
+#include "apps/wifi/wifi_eapol.h"
 
 #include "bs/bs_app.h"
 #include "bs/bs_gfx.h"
@@ -75,9 +81,10 @@ typedef struct {
 } wifi_entry_t;
 
 static const wifi_entry_t k_entries[] = {
-    { "Beacon Spam", "Flood with fake 802.11 beacons",  wifi_beacon_run   },
-    { "Deauther",    "Kick clients off their APs",      wifi_deauth_run   },
-    { "Sniffer",     "Capture 802.11 frames to PCAP",   wifi_sniffer_run  },
+    { "Beacon Spam", "Flood with fake 802.11 beacons",   wifi_beacon_run   },
+    { "Deauther",    "Kick clients off their APs",       wifi_deauth_run   },
+    { "Sniffer",     "Capture 802.11 frames to PCAP",    wifi_sniffer_run  },
+    { "EAPOL",       "Capture WPA2 handshakes to PCAP",  wifi_eapol_run    },
     { "Honeypot",    "Clone AP; serve captive portal",   wifi_honeypot_run },
     { "Karma",       "Mirror probe SSIDs; lure clients", wifi_karma_run    },
     { "Evil Twin",   "Clone AP + deauth + portal",       wifi_eviltwin_run },

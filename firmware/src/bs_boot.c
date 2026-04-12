@@ -115,6 +115,21 @@ static void draw_banner(const bs_arch_t* arch) {
 
 /* ---- Boot sequence ----------------------------------------------------- */
 
+/*
+ * Delay for 'ms' milliseconds while pumping idle_fn (konsole poll) in 10 ms
+ * slices.  Called throughout the boot sequence so the serial console stays
+ * responsive even before the "press any key" screen appears.
+ */
+static void boot_delay(const bs_arch_t* arch, void (*idle_fn)(void), uint32_t ms) {
+    const uint32_t step = 10;
+    while (ms > 0) {
+        uint32_t t = (ms < step) ? ms : step;
+        arch->delay_ms(t);
+        ms -= t;
+        if (idle_fn) idle_fn();
+    }
+}
+
 void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     /* Blank screen */
     bs_gfx_clear(g_bs_theme.bg);
@@ -123,8 +138,8 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     /* Draw static banner + separator */
     draw_banner(arch);
 
-    /* Give the banner a moment to breathe */
-    arch->delay_ms(300);
+    /* Give the banner a moment to breathe; konsole is pumped throughout */
+    boot_delay(arch, idle_fn, 300);
 
     /* --- Component initialisation log entries --------------------------- */
 
@@ -137,7 +152,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
                  bd && bd->name ? bd->name : "unknown board");
         BS_LOGOK("arch", buf);
     }
-    arch->delay_ms(80);
+    boot_delay(arch, idle_fn, 80);
 
     /* console */
 #ifdef BS_UART_BAUD
@@ -149,7 +164,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
 #else
     BS_LOGOK("console", "115200 baud");
 #endif
-    arch->delay_ms(60);
+    boot_delay(arch, idle_fn, 60);
 
     /* display */
 #ifdef BS_USE_SGFX
@@ -167,13 +182,13 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
 #else
     BS_LOGBW("display", "no display configured");
 #endif
-    arch->delay_ms(80);
+    boot_delay(arch, idle_fn, 80);
 
     /* keyboard */
     {
         const bs_board_desc_t* bd = bs_board_desc();
         BS_LOGOK("keyboard", (bd && bd->keyboard_desc) ? bd->keyboard_desc : "not configured");
-        arch->delay_ms(100);
+        boot_delay(arch, idle_fn, 100);
     }
 
     /* audio (SIC codec - future) */
@@ -182,7 +197,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
 #else
     BS_LOGBW("audio", "not configured");
 #endif
-    arch->delay_ms(80);
+    boot_delay(arch, idle_fn, 80);
 
     /* filesystem */
     if (bs_fs_available()) {
@@ -190,7 +205,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     } else {
         BS_LOGBW("storage", "no SD card");
     }
-    arch->delay_ms(60);
+    boot_delay(arch, idle_fn, 60);
 
 /* WiFi sanity probe: init → read caps → stop (driver stays resident) */
 #ifdef BS_HAS_WIFI
@@ -208,7 +223,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
             BS_LOGBF("wifi", "init failed (%d)", werr);
         }
     }
-    arch->delay_ms(60);
+    boot_delay(arch, idle_fn, 60);
 #endif
 
 /* BLE sanity probe: init → read caps → deinit (controller stays resident) */
@@ -227,13 +242,13 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
             BS_LOGBF("ble", "init failed (%d)", berr);
         }
     }
-    arch->delay_ms(60);
+    boot_delay(arch, idle_fn, 60);
 #endif
 
     /* final ready */
-    arch->delay_ms(200);
+    boot_delay(arch, idle_fn, 200);
     BS_LOGOK("system", "BeamStalker ready");
-    arch->delay_ms(500);
+    boot_delay(arch, idle_fn, 500);
 
     /* Press any key on the UI display - terminal konsole kept alive via idle_fn */
     {

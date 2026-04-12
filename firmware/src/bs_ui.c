@@ -25,6 +25,8 @@ static int      s_header_brand_mode = 0; /* 0=text, 1=logo */
 static int      s_grid_max_cols = 0;  /* 0=auto */
 static int      s_grid_max_rows = 0;  /* 0=auto */
 static bool     s_carousel     = false; /* off during boot; on after settings load */
+static int      s_palette_idx  = 0;   /* last-applied palette index */
+static int      s_border_idx   = 0;   /* last-applied border style index */
 
 /* ---- Layout helpers --------------------------------------------------- */
 
@@ -369,7 +371,7 @@ void bs_ui_set_brightness(int pct) {
 
 void bs_ui_load_settings(void) {
     char buf[192]; size_t n = 0;
-    if (bs_fs_read_file("settings.cfg", buf, sizeof buf - 1, &n) < 0) {
+    if (bs_fs_read_file(BS_PATH_SETTINGS, buf, sizeof buf - 1, &n) < 0) {
         /* No settings file: enable carousel (new-install default) */
         s_carousel = true;
         return;
@@ -412,9 +414,23 @@ void bs_ui_load_settings(void) {
         /* New format: palette + border independently */
         if (palette_idx < 0 || palette_idx >= BS_PALETTE_COUNT) palette_idx = 0;
         if (border_idx  < 0 || border_idx  >= BS_BORDER_STYLE_COUNT) border_idx = 0;
+        s_palette_idx = palette_idx;
+        s_border_idx  = border_idx;
         bs_theme_apply(palette_idx, (bs_border_style_t)border_idx);
     } else if (legacy_theme >= 0 && legacy_theme < BS_THEME_COUNT) {
         /* Old format: full theme baked together */
+        s_palette_idx = legacy_theme;
+        s_border_idx  = 0;
         bs_theme_set(bs_themes[legacy_theme]);
     }
+}
+
+int bs_ui_palette_idx(void) { return s_palette_idx; }
+int bs_ui_border_idx(void)  { return s_border_idx; }
+
+void bs_ui_set_palette_idx(int idx) {
+    if (idx >= 0 && idx < BS_PALETTE_COUNT) s_palette_idx = idx;
+}
+void bs_ui_set_border_idx(int idx) {
+    if (idx >= 0 && idx < BS_BORDER_STYLE_COUNT) s_border_idx = idx;
 }

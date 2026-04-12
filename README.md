@@ -40,16 +40,20 @@ Current firmware features include:
 
 - multi-target UI with a shared navigation model
 - native Linux target for development and debugging
-- Wi-Fi scanning
-- Wi-Fi packet capture to `.pcap`
-- Wi-Fi beacon tooling
-- Wi-Fi deauth tooling
-- captive portal / evil twin style workflows
-- karma / honeypot style workflows
+- Wi-Fi scanning (passive AP discovery, RSSI-sorted)
+- Wi-Fi packet capture to `.pcap` (DLT_IEEE802_11)
+- Wi-Fi beacon spam
+- Wi-Fi deauth (broadcast + directed, configurable reason code)
+- WPA2 EAPOL handshake capture — passive sniff or deauth-triggered, writes hashcat-compatible `.pcap` (`-m 22000`)
+- captive portal (manual rogue AP)
+- evil twin (clone AP + CSA/deauth lure + portal)
+- honeypot (broadcast or targeted client lure + portal)
+- karma (probe-response injection + portal)
 - BLE scanning
-- BLE advertisement tooling
+- BLE advertisement spam
 - on-device logs and status views
 - konsole command interface for full control without relying on the UI
+- structured SD card layout: all files under `BeamStalker/` with per-tool subfolders
 
 ## 🛠️ Build
 

@@ -96,12 +96,12 @@ static void settings_save(void) {
         s_palette_idx, s_border_idx,
         (double)k_scale_vals[s_text_scale_idx],
         k_bright_vals[s_bright_idx], s_voltage_idx, s_carousel_idx, s_header_brand_idx);
-    bs_fs_write_file("settings.cfg", buf, (size_t)n);
+    bs_fs_write_file(BS_PATH_SETTINGS, buf, (size_t)n);
 }
 
 static void settings_load(void) {
     char buf[192]; size_t n = 0;
-    if (bs_fs_read_file("settings.cfg", buf, sizeof buf - 1, &n) < 0) return;
+    if (bs_fs_read_file(BS_PATH_SETTINGS, buf, sizeof buf - 1, &n) < 0) return;
     buf[n] = '\0';
     char* line = buf;
     while (*line) {
@@ -149,7 +149,12 @@ static void settings_load(void) {
 static void apply_layout(void)     { bs_menu_set_mode((bs_menu_mode_t)s_layout_idx); bs_menu_invalidate(); }
 static void apply_grid_cols(void)  { bs_ui_set_grid_max_cols(k_grid_vals[s_grid_cols_idx]); bs_menu_invalidate(); }
 static void apply_grid_rows(void)  { bs_ui_set_grid_max_rows(k_grid_rows_vals[s_grid_rows_idx]); bs_menu_invalidate(); }
-static void apply_appearance(void) { bs_theme_apply(s_palette_idx, (bs_border_style_t)s_border_idx); bs_menu_invalidate(); }
+static void apply_appearance(void) {
+    bs_theme_apply(s_palette_idx, (bs_border_style_t)s_border_idx);
+    bs_ui_set_palette_idx(s_palette_idx);
+    bs_ui_set_border_idx(s_border_idx);
+    bs_menu_invalidate();
+}
 static void apply_text_scale(void) { bs_ui_set_text_scale((float)k_scale_vals[s_text_scale_idx]); bs_menu_invalidate(); }
 static void apply_brightness(void) { bs_ui_set_brightness(k_bright_vals[s_bright_idx]); }
 static void apply_voltage(void)    { bs_ui_set_show_voltage(s_voltage_idx != 0); }

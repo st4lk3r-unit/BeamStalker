@@ -45,6 +45,13 @@ void deauth_svc_init(const bs_arch_t* arch);
 void deauth_svc_scan_aps(void);       /* → SCANNING                           */
 /* Shortcut for CLI: no scan/select — broadcast flood on given channel.      */
 void deauth_svc_attack_broadcast(uint8_t channel);
+/* Shortcut for CLI: broadcast flood spoofed from a known BSSID+channel.    */
+void deauth_svc_attack_bssid(const uint8_t bssid[6], uint8_t channel);
+/* Shortcut for CLI: bidirectional deauth targeting one specific client.     */
+void deauth_svc_attack_client(const uint8_t bssid[6], const uint8_t client[6],
+                               uint8_t channel);
+/* Override rotating reason code. 0 = use rotating list (default).          */
+void deauth_svc_set_reason(uint16_t reason);
 void deauth_svc_sniff_clients(void);  /* → SNIFFING (from AP_READY)           */
 void deauth_svc_sniff_skip(void);     /* → CLIENT_READY immediately           */
 void deauth_svc_attack_start(void);   /* → ATTACKING (from CLIENT_READY)      */

@@ -18,6 +18,7 @@
 #include "bs/bs_wifi.h"
 #include "bs/bs_fs.h"
 #include "bs/bs_pcap.h"
+#include "beamstalker.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -205,9 +206,9 @@ static void pkt_cb(const uint8_t* data, uint16_t len,
 
 static void pcap_open_next(void) {
     if (!bs_fs_available()) { s_pcap = NULL; return; }
-    bs_fs_mkdir_p("/pcap");
+    bs_fs_mkdir_p(BS_PATH_SNIFF);
     for (int i = 0; i < 9999; i++) {
-        snprintf(s_pcap_path, sizeof s_pcap_path, "/pcap/wifi_%04d.pcap", i);
+        snprintf(s_pcap_path, sizeof s_pcap_path, BS_PATH_SNIFF "/wifi_%04d.pcap", i);
         if (!bs_fs_exists(s_pcap_path)) { s_pcap = bs_pcap_open(s_pcap_path); return; }
     }
     s_pcap = NULL;
