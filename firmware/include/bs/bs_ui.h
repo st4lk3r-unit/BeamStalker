@@ -95,6 +95,12 @@ void bs_ui_set_grid_max_rows(int n);
 
 void bs_ui_load_settings(void);  /* reads text_scale + brightness from FS */
 
+/* Current palette / border indices (set by bs_ui_load_settings or app_settings) */
+int  bs_ui_palette_idx(void);
+void bs_ui_set_palette_idx(int idx);
+int  bs_ui_border_idx(void);
+void bs_ui_set_border_idx(int idx);
+
 #ifdef __cplusplus
 }
 #endif

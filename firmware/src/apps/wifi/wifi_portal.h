@@ -81,6 +81,13 @@ const wifi_portal_cred_t* wifi_portal_get_cred(int idx);
 /* Erase all captured credentials. */
 void wifi_portal_cred_clear(void);
 
+/*
+ * Fill mac[6] with the SoftAP's BSSID (its MAC address).
+ * Used by evil-twin to build probe responses with the correct source address.
+ * Returns all-zeros if the portal is not active.
+ */
+void wifi_portal_get_bssid(uint8_t mac[6]);
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */

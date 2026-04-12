@@ -22,6 +22,7 @@
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 #include "bs/bs_fs.h"
+#include "beamstalker.h"
 
 #include <stdio.h>
 #include <stdarg.h>
@@ -35,7 +36,7 @@ static int             s_boot_start_y = 0;  /* top of boot log area         */
 /* ---- File logging ring buffer ----------------------------------------- */
 #define LOG_BUF_LINES   128
 #define LOG_LINE_MAX    128
-#define LOG_FILE        "system.log"
+#define LOG_FILE        BS_PATH_LOG
 #define LOG_MAX_BYTES   (64 * 1024)
 
 static char          s_ring    [LOG_BUF_LINES][LOG_LINE_MAX];

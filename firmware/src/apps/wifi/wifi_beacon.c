@@ -18,6 +18,7 @@
 #include "bs/bs_arch.h"
 #include "bs/bs_fs.h"
 #include "bs/bs_wifi.h"
+#include "beamstalker.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -59,7 +60,7 @@ static int  s_file_ssid_count;
 static void load_ssids_from_file(void) {
     s_file_ssid_count = 0;
     if (!bs_fs_available()) return;
-    bs_file_t f = bs_fs_open("/wifi/ssids.txt", "r");
+    bs_file_t f = bs_fs_open(BS_PATH_SSIDS, "r");
     if (!f) return;
     int idx = 0;
     while (idx < MAX_FILE_SSIDS) {
@@ -186,9 +187,9 @@ static void draw_menu(void) {
     if (s_mode == BEACON_MODE_FILE) {
         char hint[48];
         if (s_file_ssid_count > 0)
-            snprintf(hint, sizeof hint, "%d SSIDs from /wifi/ssids.txt", s_file_ssid_count);
+            snprintf(hint, sizeof hint, "%d SSIDs from ssids.txt", s_file_ssid_count);
         else
-            snprintf(hint, sizeof hint, "/wifi/ssids.txt not found");
+            snprintf(hint, sizeof hint, BS_PATH_SSIDS " not found");
         bs_ui_draw_hint(hint);
     } else {
         bs_ui_draw_hint("<<>>:cycle  SELECT=edit/start  BACK=exit");
@@ -251,7 +252,8 @@ void wifi_beacon_run(const bs_arch_t* arch) {
         return;
     }
 
-    uint32_t prev_ms = arch->millis();
+    uint32_t prev_ms    = arch->millis();
+    uint32_t last_draw  = 0;
     for (;;) {
         uint32_t now = arch->millis();
         bs_ui_advance_ms(now - prev_ms);
@@ -261,7 +263,11 @@ void wifi_beacon_run(const bs_arch_t* arch) {
         bs_nav_id_t nav;
         while ((nav = bs_nav_poll()) != BS_NAV_NONE) {
             if (s_ui_state == BCN_RUNNING) {
-                if (nav == BS_NAV_BACK) { beacon_svc_stop(); s_ui_state = BCN_MENU; }
+                if (nav == BS_NAV_BACK) {
+                    beacon_svc_stop();
+                    s_ui_state = BCN_MENU;
+                    last_draw  = 0;
+                }
                 continue;
             }
             bcn_row_t rows[6];
@@ -292,6 +298,7 @@ void wifi_beacon_run(const bs_arch_t* arch) {
                                          (const char(*)[33])s_file_ssids,
                                          s_file_ssid_count);
                         s_ui_state = BCN_RUNNING;
+                        last_draw  = 0;
                     } else if (row == ROW_BACK) {
                         return;
                     }
@@ -313,15 +320,20 @@ void wifi_beacon_run(const bs_arch_t* arch) {
 #undef CYCLE_RIGHT
         }
 
-        /* ── Tick & draw (always redraw for smooth carousel) ── */
+        /* ── Tick & draw ── */
         if (s_ui_state == BCN_RUNNING) {
+            /* Tick every loop iteration — svc self-throttles at BURST_INTERVAL_MS */
             beacon_svc_tick(now);
-            draw_running();
+            /* Redraw only every RUNNING_DRAW_INTERVAL_MS; don't let render cap TX */
+            if (last_draw == 0 || (now - last_draw) >= RUNNING_DRAW_INTERVAL_MS) {
+                last_draw = now;
+                draw_running();
+            }
+            arch->delay_ms(1);
         } else {
             draw_menu();
+            arch->delay_ms(16);
         }
-
-        arch->delay_ms(16);
     }
 }
 

