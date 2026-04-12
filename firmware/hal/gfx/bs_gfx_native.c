@@ -151,34 +151,55 @@ void bs_gfx_bitmap_1bpp(int x, int y, int w, int h,
 
 /*
  * Text rendering: 5×7 bitmap font → filled rectangles.
- * scale=1: each font pixel = 1 logical pixel (7px tall glyphs)
- * scale=3: each font pixel = 3×3 logical pixels (21px tall glyphs)
+ * Fractional scale (e.g. 1.5) uses next-pixel-boundary sizing so font
+ * pixels alternate between 1px and 2px — no gaps, no overlaps.
  */
-void bs_gfx_text(int x, int y, const char* s, bs_color_t c, int scale) {
-    if (!s_renderer || !s || scale < 1) return;
+void bs_gfx_text(int x, int y, const char* s, bs_color_t c, float scale) {
+    if (!s_renderer || !s || scale < 0.5f) return;
     SDL_SetRenderDrawColor(s_renderer, c.r, c.g, c.b, 255);
-    for (; *s; ++s, x += 6 * scale) {
+    int adv = (int)(6.0f * scale);
+    if (adv < 1) adv = 1;
+    for (; *s; ++s, x += adv) {
         uint8_t font_cols[5];
         if (!sgfx_font5x7_get(*s, font_cols)) continue;
         for (int col = 0; col < 5; col++) {
+            int px = x + (int)((float)col * scale);
+            int pw = (int)((float)(col + 1) * scale) - (int)((float)col * scale);
+            if (pw < 1) pw = 1;
             for (int row = 0; row < 7; row++) {
                 if (!((font_cols[col] >> row) & 1u)) continue;
-                SDL_Rect r = {x + col * scale, y + row * scale, scale, scale};
+                int py = y + (int)((float)row * scale);
+                int ph = (int)((float)(row + 1) * scale) - (int)((float)row * scale);
+                if (ph < 1) ph = 1;
+                SDL_Rect r = {px, py, pw, ph};
                 SDL_RenderFillRect(s_renderer, &r);
             }
         }
     }
 }
 
-int bs_gfx_text_w(const char* s, int scale) {
-    if (!s || scale < 1) return 0;
+int bs_gfx_text_w(const char* s, float scale) {
+    if (!s || scale < 0.5f) return 0;
     int n = 0; while (*s++) n++;
-    return n * 6 * scale;
+    return (int)((float)n * 6.0f * scale);
 }
 
-int bs_gfx_text_h(int scale) {
-    return 7 * (scale < 1 ? 1 : scale);
+int bs_gfx_text_h(float scale) {
+    return (int)(7.0f * (scale < 1.0f ? 1.0f : scale));
 }
+
+void bs_gfx_clip(int x, int y, int w, int h) {
+    if (!s_renderer) return;
+    if (w <= 0 || h <= 0) {
+        SDL_RenderSetClipRect(s_renderer, NULL);
+    } else {
+        SDL_Rect r = {x, y, w, h};
+        SDL_RenderSetClipRect(s_renderer, &r);
+    }
+}
+
+/* Weak reference — bs_ui.c provides the strong version for carousel animation */
+__attribute__((weak)) void bs_ui_tick(void) {}
 
 /*
  * Present: copy framebuffer texture to window (scaled) and flip.
@@ -187,6 +208,9 @@ int bs_gfx_text_h(int scale) {
  */
 void bs_gfx_present(void) {
     if (!s_renderer) return;
+
+    /* Disable clip before blitting to window */
+    SDL_RenderSetClipRect(s_renderer, NULL);
 
     /* Blit framebuffer to window surface */
     SDL_SetRenderTarget(s_renderer, NULL);
@@ -199,6 +223,8 @@ void bs_gfx_present(void) {
     /* Keep window responsive; QUIT event exits cleanly */
     SDL_PumpEvents();
     if (SDL_HasEvent(SDL_QUIT)) exit(0);
+
+    bs_ui_tick();
 }
 
 void bs_gfx_set_brightness(int pct) { (void)pct; /* SDL window, no backlight control */ }

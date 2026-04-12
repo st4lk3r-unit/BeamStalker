@@ -13,6 +13,17 @@
 #  define BS_FW_NAME "BeamStalker"
 #endif
 
+/*
+ * SD card sub-paths — the fs HAL (bs_fs_sdcard.cpp) already roots all paths
+ * under /BeamStalker/ on the card, so these are relative to that root.
+ */
+#define BS_PATH_SETTINGS "settings.cfg"
+#define BS_PATH_LOG      "system.log"
+#define BS_PATH_WIFI     "wifi"
+#define BS_PATH_SSIDS    "wifi/ssids.txt"
+#define BS_PATH_SNIFF    "wifi/sniff"
+#define BS_PATH_EAPOL    "wifi/eapol"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

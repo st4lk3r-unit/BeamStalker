@@ -19,6 +19,7 @@
 #include "bs/bs_gfx.h"
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
+#include "bs/bs_board.h"
 #include "bs/bs_nav.h"
 #include "bs/bs_arch.h"
 
@@ -51,33 +52,23 @@ static const uint8_t k_log_icon_16[] = {
  * chars_per_row - how many characters fit in text_w pixels at scale ts.
  * Uses a single-char probe; all built-in fonts are monospace.
  */
-static int chars_per_row(int text_w, int ts) {
+static int chars_per_row(int text_w, float ts) {
     int cw = bs_gfx_text_w("W", ts);
     if (cw <= 0) cw = 6;
     int cpr = text_w / cw;
     return (cpr < 1) ? 1 : cpr;
 }
 
-/*
- * entry_rows - number of display rows a single log entry occupies when wrapped.
- */
-static int entry_rows(const char* text, int cpr) {
-    int len = (int)strlen(text);
-    if (len == 0) return 1;
-    return (len + cpr - 1) / cpr;
-}
-
 /* ---- Draw -------------------------------------------------------------- */
 
 static void draw_log_view(int scroll) {
-    int ts      = bs_ui_text_scale();
+    float ts    = bs_ui_text_scale();
     int sw      = bs_gfx_width();
     int sh      = bs_gfx_height();
     int hh      = bs_ui_header_h();
     int line_h  = bs_gfx_text_h(ts) + 2;
     int visible = (sh - hh) / line_h;
     int count   = bs_log_count();
-    int cpr     = chars_per_row(sw - 4, ts);   /* chars per display row */
 
     bs_gfx_clear(g_bs_theme.bg);
 
@@ -88,7 +79,8 @@ static void draw_log_view(int scroll) {
     bs_gfx_text(8, ty, title, g_bs_theme.primary, ts);
     bs_gfx_hline(0, hh - 1, sw, g_bs_theme.dim);
 
-    /* Entries — rendered with line wrap */
+    /* Entries — rendered with character-level line wrapping */
+    int cpr         = chars_per_row(sw - 4, ts);
     int display_row = 0;
     int last_i      = scroll - 1;   /* track highest entry actually rendered */
 
@@ -106,18 +98,23 @@ static void draw_log_view(int scroll) {
 
         bs_color_t col = bs_log_level_color(bs_log_entry_lvl(i));
 
-        int offset = 0;
-        do {
-            if (display_row >= visible) break;
-            int chunk = elen - offset;
-            if (chunk > cpr) chunk = cpr;
-            char tmp[256];
-            memcpy(tmp, buf + offset, (size_t)chunk);
-            tmp[chunk] = '\0';
-            bs_gfx_text(2, hh + display_row * line_h, tmp, col, ts);
+        int len = (int)strlen(buf);
+        if (len == 0) {
             display_row++;
-            offset += chunk;
-        } while (offset < elen);
+        } else {
+            int offset = 0;
+            do {
+                int chunk = len - offset;
+                if (chunk > cpr) chunk = cpr;
+                char line_buf[256];
+                memcpy(line_buf, buf + offset, (size_t)chunk);
+                line_buf[chunk] = '\0';
+                if (display_row < visible)
+                    bs_gfx_text(2, hh + display_row * line_h, line_buf, col, ts);
+                display_row++;
+                offset += chunk;
+            } while (offset < len && display_row <= visible);
+        }
 
         last_i = i;
     }
@@ -136,7 +133,7 @@ static void draw_log_view(int scroll) {
 /* ---- App --------------------------------------------------------------- */
 
 static void app_log_run(const bs_arch_t* arch) {
-    int ts      = bs_ui_text_scale();
+    float ts    = bs_ui_text_scale();
     int sh      = bs_gfx_height();
     int hh      = bs_ui_header_h();
     int line_h  = bs_gfx_text_h(ts) + 2;
@@ -148,48 +145,57 @@ static void app_log_run(const bs_arch_t* arch) {
     if (scroll < 0) scroll = 0;
 
     bool dirty = true;
+    uint32_t prev_ms = arch->millis();
+    uint32_t last_anim_ms = prev_ms;
 
     while (true) {
+        uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
+
         count = bs_log_count();
 
-        if (dirty) {
+        bool anim_due = bs_ui_carousel_enabled() && (uint32_t)(now - last_anim_ms) >= 100U;
+        if (dirty || anim_due) {
             draw_log_view(scroll);
             bs_gfx_present();
             dirty = false;
+            if (anim_due) last_anim_ms = now;
         }
 
-        arch->delay_ms(5);
-        bs_nav_id_t nav = bs_nav_poll();
+        bs_nav_id_t nav;
+        while ((nav = bs_nav_poll()) != BS_NAV_NONE) {
+            switch (nav) {
+                case BS_NAV_BACK:
+                    return;
 
-        switch (nav) {
-            case BS_NAV_BACK:
-                return;
+                case BS_NAV_UP:
+                case BS_NAV_PREV:
+                    if (scroll > 0) { scroll--; dirty = true; }
+                    break;
 
-            case BS_NAV_UP:
-            case BS_NAV_PREV:
-                if (scroll > 0) { scroll--; dirty = true; }
-                break;
+                case BS_NAV_DOWN:
+                case BS_NAV_NEXT:
+                    if (scroll < count - 1) { scroll++; dirty = true; }
+                    break;
 
-            case BS_NAV_DOWN:
-            case BS_NAV_NEXT:
-                if (scroll < count - 1) { scroll++; dirty = true; }
-                break;
+                case BS_NAV_LEFT:   /* page up */
+                    scroll -= visible;
+                    if (scroll < 0) scroll = 0;
+                    dirty = true;
+                    break;
 
-            case BS_NAV_LEFT:   /* page up */
-                scroll -= visible;
-                if (scroll < 0) scroll = 0;
-                dirty = true;
-                break;
+                case BS_NAV_RIGHT:  /* page down */
+                    scroll += visible;
+                    if (scroll >= count) scroll = count > 0 ? count - 1 : 0;
+                    dirty = true;
+                    break;
 
-            case BS_NAV_RIGHT:  /* page down */
-                scroll += visible;
-                if (scroll >= count) scroll = count > 0 ? count - 1 : 0;
-                dirty = true;
-                break;
-
-            default:
-                break;
+                default:
+                    break;
+            }
         }
+        arch->delay_ms((uint32_t)bs_board_ui_idle_delay_ms());
     }
 }
 

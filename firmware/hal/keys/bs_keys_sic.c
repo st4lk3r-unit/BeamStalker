@@ -17,6 +17,7 @@
 
 static unsigned long long s_prev_bitmap = 0;
 static int  s_btn_prev = 0;
+static int32_t s_enc_poll_pending = 0;
 
 /* =========================================================================
  * ESP32 interrupt-driven encoder
@@ -28,12 +29,23 @@ static int  s_btn_prev = 0;
 
 #include "driver/gpio.h"
 #include "esp_attr.h"
+#include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 
-static portMUX_TYPE     s_enc_mux   = portMUX_INITIALIZER_UNLOCKED;
-static volatile int32_t s_enc_accum = 0;
-static volatile int     s_enc_last  = 0;   /* previous (a<<1|b) state */
+static portMUX_TYPE     s_enc_mux      = portMUX_INITIALIZER_UNLOCKED;
+static volatile int32_t s_enc_accum    = 0;
+static volatile int32_t s_enc_pending  = 0;
+static volatile int     s_enc_last     = 0;   /* previous (a<<1|b) state */
+static bool             s_enc_isr_live = false;
+
+#if defined(VARIANT_TPAGER)
+#define BS_ENC_ISR_DETENT_STEPS 2
+#define BS_ENC_ISR_DETENT_MASK  ((1u << 0) | (1u << 3))   /* half-step detents: 00 + 11 */
+#else
+#define BS_ENC_ISR_DETENT_STEPS 4
+#define BS_ENC_ISR_DETENT_MASK  (1u << 0)                 /* full-step detent: 00 */
+#endif
 
 static const int8_t k_enc_isr_tbl[4][4] = {
     { 0, -1, +1,  0 },   /* prev 00 */
@@ -42,6 +54,10 @@ static const int8_t k_enc_isr_tbl[4][4] = {
     { 0, +1, -1,  0 },   /* prev 11 */
 };
 
+static inline bool IRAM_ATTR bs_enc_is_detent_state(int st) {
+    return (BS_ENC_ISR_DETENT_MASK & (1u << st)) != 0;
+}
+
 static void IRAM_ATTR bs_enc_isr(void* arg) {
     (void)arg;
     int a   = gpio_get_level((gpio_num_t)BS_ENC_PIN_A);
@@ -49,31 +65,70 @@ static void IRAM_ATTR bs_enc_isr(void* arg) {
     int cur = (a << 1) | b;
     int d   = k_enc_isr_tbl[s_enc_last][cur];
     s_enc_last = cur;
+    if (!d) return;
+
     portENTER_CRITICAL_ISR(&s_enc_mux);
     s_enc_accum += d;
+
+    /* Emit exactly one logical step when we land on a detent state with
+     * enough accumulated motion.  This gives 1 UI move per physical notch
+     * instead of 1 move per quadrature edge. */
+    if (bs_enc_is_detent_state(cur)) {
+        if (s_enc_accum >= BS_ENC_ISR_DETENT_STEPS) {
+            s_enc_pending += 1;
+            s_enc_accum = 0;
+        } else if (s_enc_accum <= -BS_ENC_ISR_DETENT_STEPS) {
+            s_enc_pending -= 1;
+            s_enc_accum = 0;
+        } else if (s_enc_accum > -BS_ENC_ISR_DETENT_STEPS &&
+                   s_enc_accum <  BS_ENC_ISR_DETENT_STEPS) {
+            /* Returned to a rest position without a full detent worth of
+             * motion: treat it as bounce/noise and discard the partial. */
+            s_enc_accum = 0;
+        }
+    }
+
     portEXIT_CRITICAL_ISR(&s_enc_mux);
 }
 
-static void bs_enc_isr_init(void) {
+static bool bs_enc_isr_init(void) {
     s_enc_last = (gpio_get_level((gpio_num_t)BS_ENC_PIN_A) << 1)
                |  gpio_get_level((gpio_num_t)BS_ENC_PIN_B);
-    gpio_set_intr_type((gpio_num_t)BS_ENC_PIN_A, GPIO_INTR_ANYEDGE);
-    gpio_set_intr_type((gpio_num_t)BS_ENC_PIN_B, GPIO_INTR_ANYEDGE);
-    gpio_isr_handler_add((gpio_num_t)BS_ENC_PIN_A, bs_enc_isr, NULL);
-    gpio_isr_handler_add((gpio_num_t)BS_ENC_PIN_B, bs_enc_isr, NULL);
+
+    /* Safe to call repeatedly: INVALID_STATE means the shared GPIO ISR
+     * service is already installed by some other subsystem. */
+    esp_err_t rc = gpio_install_isr_service(0);
+    if (rc != ESP_OK && rc != ESP_ERR_INVALID_STATE)
+        return false;
+
+    if (gpio_set_intr_type((gpio_num_t)BS_ENC_PIN_A, GPIO_INTR_ANYEDGE) != ESP_OK)
+        return false;
+    if (gpio_set_intr_type((gpio_num_t)BS_ENC_PIN_B, GPIO_INTR_ANYEDGE) != ESP_OK)
+        return false;
+
+    /* Remove stale handlers first so re-inits do not fail with duplicates. */
+    gpio_isr_handler_remove((gpio_num_t)BS_ENC_PIN_A);
+    gpio_isr_handler_remove((gpio_num_t)BS_ENC_PIN_B);
+
+    if (gpio_isr_handler_add((gpio_num_t)BS_ENC_PIN_A, bs_enc_isr, NULL) != ESP_OK)
+        return false;
+    if (gpio_isr_handler_add((gpio_num_t)BS_ENC_PIN_B, bs_enc_isr, NULL) != ESP_OK)
+        return false;
+
+    return true;
 }
 
 /* Returns +1 (CCW/up), -1 (CW/down), or 0. Consumes one detent at a time. */
 static int bs_enc_read(void) {
     portENTER_CRITICAL(&s_enc_mux);
-    int32_t acc = s_enc_accum;
-    if (acc >= 4) {
-        s_enc_accum -= 4;
+    int32_t pending = s_enc_pending;
+    if (pending > 0) {
+        s_enc_pending = pending - 1;
         portEXIT_CRITICAL(&s_enc_mux);
         return +1;
     }
-    if (acc <= -4) {
-        s_enc_accum += 4;
+    if (pending < 0) {
+        s_enc_pending = pending + 1;
         portEXIT_CRITICAL(&s_enc_mux);
         return -1;
     }
@@ -91,8 +146,9 @@ void bs_keys_init(const bs_arch_t* arch) {
     (void)arch;
     s_prev_bitmap = 0;
     s_btn_prev    = 0;
+    s_enc_poll_pending = 0;
 #ifdef BS_ENC_ISR_AVAILABLE
-    bs_enc_isr_init();
+    s_enc_isr_live = bs_enc_isr_init();
 #endif
 }
 
@@ -104,7 +160,7 @@ bool bs_keys_poll(bs_key_t* out) {
 
     /* ---- Rotary encoder ---- */
 #ifdef BS_ENC_ISR_AVAILABLE
-    {
+    if (s_enc_isr_live) {
         int delta = bs_enc_read();
         if (delta > 0) { out->id = BS_KEY_UP;   return true; }
         if (delta < 0) { out->id = BS_KEY_DOWN; return true; }
@@ -116,21 +172,38 @@ bool bs_keys_poll(bs_key_t* out) {
             s_btn_prev   = btn;
             if (btn_edge) { out->id = BS_KEY_ENTER; return true; }
         }
+        return false;
     }
-#else
+#endif
+
     {
         const encoder_t* enc = sic_encoder(0);
         if (enc) {
             int delta = enc->v->read_delta(enc);
             int btn   = enc->v->read_btn(enc);
-            if (delta > 0) { out->id = BS_KEY_UP;   return true; }
-            if (delta < 0) { out->id = BS_KEY_DOWN; return true; }
+
+            if (delta != 0) {
+                s_enc_poll_pending += delta;
+                if (s_enc_poll_pending > 64) s_enc_poll_pending = 64;
+                if (s_enc_poll_pending < -64) s_enc_poll_pending = -64;
+            }
+
+            if (s_enc_poll_pending > 0) {
+                s_enc_poll_pending--;
+                out->id = BS_KEY_UP;
+                return true;
+            }
+            if (s_enc_poll_pending < 0) {
+                s_enc_poll_pending++;
+                out->id = BS_KEY_DOWN;
+                return true;
+            }
+
             int btn_edge = (btn == 1 && s_btn_prev == 0);
             s_btn_prev   = btn;
             if (btn_edge) { out->id = BS_KEY_ENTER; return true; }
         }
     }
-#endif
 
     /* ---- Keyboard bitmap ---- */
     const kscan_t* kbd = sic_kbd(0);

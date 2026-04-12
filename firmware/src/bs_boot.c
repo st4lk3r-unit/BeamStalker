@@ -34,6 +34,7 @@
 #include "bs/bs_fs.h"
 #include "bs/bs_wifi.h"
 #include "bs/bs_ble.h"
+#include "bs/bs_board.h"
 #include <stdio.h>
 #include <string.h>
 #include "bs/bs_assets.h"
@@ -47,45 +48,87 @@
  * Both rendered on the same baseline row.
  */
 static void draw_banner(const bs_arch_t* arch) {
-    int sw = bs_gfx_width();
+    const int sw = bs_gfx_width();
+    const int sh = bs_gfx_height();
 
-    /* Skull: 120×120 source rendered at step=2 → 60×60 on screen */
+    /* Tiny screens (e.g. 160x80 T-Dongle-S3): keep the splash compact but
+     * still retain the version tag. Target roughly the top third of the panel. */
+    if (sh <= 100 || sw <= 200) {
+        int sep_y = (sh * 34) / 100;
+        if (sep_y < 24) sep_y = 24;
+        if (sep_y > 30) sep_y = 30;
+
+        const int skull_x = 2;
+        const int skull_y = 2;
+        int skull_sz = sep_y - 6;
+        if (skull_sz < 14) skull_sz = 14;
+        int step = 120 / skull_sz;
+        if (step < 1) step = 1;
+        if (step > 8) step = 8;
+        skull_sz = (120 + step - 1) / step;
+
+        const int tx = skull_x + skull_sz + 4;
+        const int ty = 3;
+        const int ver_y = sep_y - bs_gfx_text_h(1) - 1;
+
+        bs_gfx_fill_rect(0, 0, sw, sep_y + 1, g_bs_theme.bg);
+        bs_gfx_bitmap_1bpp(skull_x, skull_y, 120, 120, bs_skull_120,
+                           g_bs_theme.primary, 1, step);
+        bs_gfx_text(tx, ty, "BEAM", g_bs_theme.primary, 1);
+        bs_gfx_text(tx, ty + 8, "STALKER", g_bs_theme.accent, 1);
+        bs_gfx_text(tx, ver_y, "v" BS_VERSION, g_bs_theme.dim, 1);
+        bs_gfx_hline(0, sep_y, sw, g_bs_theme.dim);
+        bs_log_boot_reset(sep_y + 2);
+        bs_gfx_present();
+        (void)arch;
+        return;
+    }
+
+    /* Larger screens keep the original splash layout. */
     int skull_x = 4,  skull_y = 4;
     int skull_w = 60, skull_h = 60;
-    int sep_y   = skull_y + skull_h + 4;   /* guaranteed below skull: 4+60+4=68 */
+    int sep_y   = skull_y + skull_h + 4;
 
-    /* Clear banner region (exactly to separator, never more) */
     bs_gfx_fill_rect(0, 0, sw, sep_y + 1, g_bs_theme.bg);
-
-    /* Skull logo - top-left, downscaled 2× */
     bs_gfx_bitmap_1bpp(skull_x, skull_y, 120, 120, bs_skull_120, g_bs_theme.primary, 1, 2);
 
-    /* "BEAM STALKER" - right of skull, text block vertically centred in skull height */
     int sc      = 2;
-    int th      = bs_gfx_text_h(sc);                       /* 14 px */
-    int h1      = bs_gfx_text_h(1);                        /*  7 px */
-    int block_h = th + 3 + h1;                             /* 24 px */
-    int tx      = skull_x + skull_w + 10;                  /* 74    */
-    int ty      = skull_y + (skull_h - block_h) / 2;       /* 22    */
+    int th      = bs_gfx_text_h(sc);
+    int h1      = bs_gfx_text_h(1);
+    int block_h = th + 3 + h1;
+    int tx      = skull_x + skull_w + 10;
+    int ty      = skull_y + (skull_h - block_h) / 2;
     int bw      = bs_gfx_text_w("BEAM", sc);
     int sp      = bs_gfx_text_w(" ", sc);
-    bs_gfx_text(tx,        ty, "BEAM",    g_bs_theme.primary,     sc);
-    bs_gfx_text(tx+bw+sp,  ty, "STALKER", g_bs_theme.accent, sc);
+    bs_gfx_text(tx,        ty, "BEAM",    g_bs_theme.primary, sc);
+    bs_gfx_text(tx+bw+sp,  ty, "STALKER", g_bs_theme.accent,  sc);
 
-    /* Version tag */
     int vy = ty + th + 3;
     const char* ver = "v" BS_VERSION "  ·  cross-platform firmware";
     bs_gfx_text(tx, vy, ver, g_bs_theme.dim, 1);
 
-    /* Separator - anchored to skull bottom, not text bottom */
     bs_gfx_hline(0, sep_y, sw, g_bs_theme.dim);
-
     bs_log_boot_reset(sep_y + 3);
     bs_gfx_present();
     (void)arch;
 }
 
 /* ---- Boot sequence ----------------------------------------------------- */
+
+/*
+ * Delay for 'ms' milliseconds while pumping idle_fn (konsole poll) in 10 ms
+ * slices.  Called throughout the boot sequence so the serial console stays
+ * responsive even before the "press any key" screen appears.
+ */
+static void boot_delay(const bs_arch_t* arch, void (*idle_fn)(void), uint32_t ms) {
+    const uint32_t step = 10;
+    while (ms > 0) {
+        uint32_t t = (ms < step) ? ms : step;
+        arch->delay_ms(t);
+        ms -= t;
+        if (idle_fn) idle_fn();
+    }
+}
 
 void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     /* Blank screen */
@@ -95,22 +138,21 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     /* Draw static banner + separator */
     draw_banner(arch);
 
-    /* Give the banner a moment to breathe */
-    arch->delay_ms(300);
+    /* Give the banner a moment to breathe; konsole is pumped throughout */
+    boot_delay(arch, idle_fn, 300);
 
     /* --- Component initialisation log entries --------------------------- */
 
     /* arch */
-#if defined(VARIANT_TPAGER)
-    BS_LOGOK("arch", "ESP32-S3 arduino - T-Pager");
-#elif defined(VARIANT_CARDPUTER)
-    BS_LOGOK("arch", "ESP32-S3 arduino - Cardputer");
-#elif defined(VARIANT_NATIVE)
-    BS_LOGOK("arch", "POSIX native linux");
-#else
-    BS_LOGOK("arch", "unknown variant");
-#endif
-    arch->delay_ms(80);
+    {
+        const bs_board_desc_t* bd = bs_board_desc();
+        char buf[96];
+        snprintf(buf, sizeof(buf), "%s - %s",
+                 bd && bd->arch_desc ? bd->arch_desc : "unknown arch",
+                 bd && bd->name ? bd->name : "unknown board");
+        BS_LOGOK("arch", buf);
+    }
+    boot_delay(arch, idle_fn, 80);
 
     /* console */
 #ifdef BS_UART_BAUD
@@ -122,7 +164,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
 #else
     BS_LOGOK("console", "115200 baud");
 #endif
-    arch->delay_ms(60);
+    boot_delay(arch, idle_fn, 60);
 
     /* display */
 #ifdef BS_USE_SGFX
@@ -140,23 +182,14 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
 #else
     BS_LOGBW("display", "no display configured");
 #endif
-    arch->delay_ms(80);
+    boot_delay(arch, idle_fn, 80);
 
     /* keyboard */
-#ifdef BS_KEYS_SIC
-#  if defined(VARIANT_CARDPUTER)
-    BS_LOGOK("keyboard", "74HC138 56-key matrix");
-    arch->delay_ms(120);
-#  else
-    BS_LOGOK("keyboard", "TCA8418 64-key matrix");
-    arch->delay_ms(120);
-    BS_LOGOK("encoder", "rotary input active");
-    arch->delay_ms(60);
-#  endif
-#elif defined(BS_KEYS_NATIVE)
-    BS_LOGOK("keyboard", "raw terminal input");
-    arch->delay_ms(60);
-#endif
+    {
+        const bs_board_desc_t* bd = bs_board_desc();
+        BS_LOGOK("keyboard", (bd && bd->keyboard_desc) ? bd->keyboard_desc : "not configured");
+        boot_delay(arch, idle_fn, 100);
+    }
 
     /* audio (SIC codec - future) */
 #ifdef BS_USE_SIC
@@ -164,7 +197,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
 #else
     BS_LOGBW("audio", "not configured");
 #endif
-    arch->delay_ms(80);
+    boot_delay(arch, idle_fn, 80);
 
     /* filesystem */
     if (bs_fs_available()) {
@@ -172,7 +205,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
     } else {
         BS_LOGBW("storage", "no SD card");
     }
-    arch->delay_ms(60);
+    boot_delay(arch, idle_fn, 60);
 
 /* WiFi sanity probe: init → read caps → stop (driver stays resident) */
 #ifdef BS_HAS_WIFI
@@ -190,7 +223,7 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
             BS_LOGBF("wifi", "init failed (%d)", werr);
         }
     }
-    arch->delay_ms(60);
+    boot_delay(arch, idle_fn, 60);
 #endif
 
 /* BLE sanity probe: init → read caps → deinit (controller stays resident) */
@@ -209,18 +242,18 @@ void bs_boot_run(const bs_arch_t* arch, void (*idle_fn)(void)) {
             BS_LOGBF("ble", "init failed (%d)", berr);
         }
     }
-    arch->delay_ms(60);
+    boot_delay(arch, idle_fn, 60);
 #endif
 
     /* final ready */
-    arch->delay_ms(200);
+    boot_delay(arch, idle_fn, 200);
     BS_LOGOK("system", "BeamStalker ready");
-    arch->delay_ms(500);
+    boot_delay(arch, idle_fn, 500);
 
     /* Press any key on the UI display - terminal konsole kept alive via idle_fn */
     {
         static const char* prompt = "[ press any key ]";
-        int ts   = bs_ui_text_scale();
+        float ts = bs_ui_text_scale();
         int sw   = bs_gfx_width();
         int sh   = bs_gfx_height();
         int pw   = bs_gfx_text_w(prompt, ts);

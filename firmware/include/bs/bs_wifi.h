@@ -49,6 +49,7 @@ extern "C" {
 #define BS_WIFI_CAP_SNIFF    (1u << 2)  /* promiscuous 802.11 frame rx      */
 #define BS_WIFI_CAP_MONITOR  (1u << 3)  /* monitor mode with radiotap hdr  */
 #define BS_WIFI_CAP_INJECT   (1u << 4)  /* raw 802.11 frame transmit        */
+#define BS_WIFI_CAP_AP       (1u << 5)  /* SoftAP / APSTA hosting            */
 
 /* ── Driver state ──────────────────────────────────────────────────────── */
 
@@ -82,6 +83,12 @@ typedef struct {
     uint8_t        channel;     /* 1–14                                    */
     bs_wifi_auth_t auth;
 } bs_wifi_ap_t;
+
+/* ── Associated station snapshot (SoftAP) ─────────────────────────────── */
+
+typedef struct {
+    uint8_t mac[6];
+} bs_wifi_sta_t;
 
 /* ── Raw frame callback ────────────────────────────────────────────────── */
 
@@ -142,6 +149,28 @@ void bs_wifi_disconnect(void);
 /* Write assigned IPv4 address as a dotted-decimal string (needs ≥16 bytes).
  * Returns 0 when connected and IP is available, <0 otherwise.              */
 int  bs_wifi_get_ip(char* buf, size_t len);
+
+/* ── SoftAP / APSTA hosting ────────────────────────────────────────────── */
+
+/* Start or reconfigure a SoftAP on the given channel. password may be NULL
+ * or <8 chars to create an open AP. Returns 0 on success, <0 on error.    */
+int  bs_wifi_ap_start(const char* ssid, uint8_t channel, const char* password);
+
+/* Stop the SoftAP side and return to STA-only mode. Safe if not running.   */
+void bs_wifi_ap_stop(void);
+
+/* Number of currently associated stations, or <0 if unsupported.           */
+int  bs_wifi_ap_client_count(void);
+
+/* Copy up to max_count associated station MAC addresses into out[].        */
+int  bs_wifi_ap_client_list(bs_wifi_sta_t* out, int max_count);
+
+/* Override the DHCP-advertised DNS server for the SoftAP. ip must point to
+ * 4 bytes in network order (for example {192,168,4,1}).                    */
+int  bs_wifi_ap_set_dns_ip(const uint8_t ip[4]);
+
+/* Set DHCP captive-portal URI option when supported by the backend.        */
+int  bs_wifi_ap_set_captive_portal_uri(const char* uri);
 
 /* ── Monitor mode (802.11 + optional radiotap) ─────────────────────────── */
 

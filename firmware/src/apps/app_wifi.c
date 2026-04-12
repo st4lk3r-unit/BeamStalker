@@ -5,6 +5,11 @@
  *   [0] Beacon Spam  — flood the air with 802.11 beacons
  *   [1] Deauther     — deauth clients from selected APs
  *   [2] Sniffer      — promiscuous capture to PCAP on SD
+ *   [3] EAPOL        — WPA2 handshake capture (+ optional deauth)
+ *   [4] Honeypot     — clone AP; serve captive portal
+ *   [5] Karma        — mirror probe SSIDs; lure clients
+ *   [6] Evil Twin    — clone AP + deauth + portal
+ *   [7] Cap. Portal  — manual rogue AP + portal
  */
 #include "bs/bs_wifi.h"   /* must come first — defines BS_HAS_WIFI */
 #ifdef BS_HAS_WIFI
@@ -17,12 +22,14 @@
 #include "apps/wifi/wifi_karma.h"
 #include "apps/wifi/wifi_captive.h"
 #include "apps/wifi/wifi_eviltwin.h"
+#include "apps/wifi/wifi_eapol.h"
 
 #include "bs/bs_app.h"
 #include "bs/bs_gfx.h"
 #include "bs/bs_nav.h"
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
+#include "bs/bs_board.h"
 #include "bs/bs_arch.h"
 
 #include <stdio.h>
@@ -74,9 +81,10 @@ typedef struct {
 } wifi_entry_t;
 
 static const wifi_entry_t k_entries[] = {
-    { "Beacon Spam", "Flood with fake 802.11 beacons",  wifi_beacon_run   },
-    { "Deauther",    "Kick clients off their APs",      wifi_deauth_run   },
-    { "Sniffer",     "Capture 802.11 frames to PCAP",   wifi_sniffer_run  },
+    { "Beacon Spam", "Flood with fake 802.11 beacons",   wifi_beacon_run   },
+    { "Deauther",    "Kick clients off their APs",       wifi_deauth_run   },
+    { "Sniffer",     "Capture 802.11 frames to PCAP",    wifi_sniffer_run  },
+    { "EAPOL",       "Capture WPA2 handshakes to PCAP",  wifi_eapol_run    },
     { "Honeypot",    "Clone AP; serve captive portal",   wifi_honeypot_run },
     { "Karma",       "Mirror probe SSIDs; lure clients", wifi_karma_run    },
     { "Evil Twin",   "Clone AP + deauth + portal",       wifi_eviltwin_run },
@@ -87,48 +95,33 @@ static const wifi_entry_t k_entries[] = {
 /* ── Draw ────────────────────────────────────────────────────────────────── */
 
 static void draw_menu(int cursor, bool caps_ok) {
-    int ts   = bs_ui_text_scale();
-    int ts2  = ts > 1 ? ts - 1 : 1;
-    int sw   = bs_gfx_width();
-    int cy   = bs_ui_content_y();
-    /* Each entry: name line + description line + vertical padding */
-    int lh   = bs_gfx_text_h(ts) + bs_gfx_text_h(ts2) + 10;
+    float ts = bs_ui_text_scale();
+    int   cy = bs_ui_content_y();
+    int   lh = bs_ui_menu_row_h(ts);
 
     bs_gfx_clear(g_bs_theme.bg);
     bs_ui_draw_header("WiFi Tools");
 
     if (!caps_ok) {
-        bs_gfx_text(8, cy, "WiFi unavailable on this target",
-                    g_bs_theme.warn, ts);
+        bs_gfx_text(8, cy, "WiFi unavailable on this target", g_bs_theme.warn, ts);
         bs_ui_draw_hint("BACK=exit");
         bs_gfx_present();
         return;
     }
 
-    int hint_h  = bs_gfx_text_h(ts2) + 6;
-    int visible = (bs_gfx_height() - cy - hint_h) / lh;
-    if (visible < 1) visible = 1;
-
-    int scroll = cursor - visible / 2;
+    int visible = bs_ui_menu_visible(ts);
+    int scroll  = cursor - visible / 2;
     if (scroll < 0) scroll = 0;
     if (scroll > WIFI_ENTRY_COUNT - visible) scroll = WIFI_ENTRY_COUNT - visible;
     if (scroll < 0) scroll = 0;
 
     for (int i = 0; i < visible && (scroll + i) < WIFI_ENTRY_COUNT; i++) {
         int idx = scroll + i;
-        bool sel = (idx == cursor);
-        int  y   = cy + i * lh;
-        if (sel)
-            bs_gfx_fill_rect(0, y - 3, sw, lh - 1, g_bs_theme.dim);
-
-        bs_color_t nc = sel ? g_bs_theme.accent   : g_bs_theme.primary;
-        bs_color_t dc = sel ? g_bs_theme.primary  : g_bs_theme.dim;
-
-        bs_gfx_text(8, y,                     k_entries[idx].name, nc, ts);
-        bs_gfx_text(8, y + bs_gfx_text_h(ts) + 2,
-                    k_entries[idx].desc, dc, ts2);
+        bs_ui_draw_menu_row(cy + i * lh, k_entries[idx].name, k_entries[idx].desc,
+                            idx == cursor, ts);
     }
 
+    bs_ui_draw_scroll_arrows(scroll, WIFI_ENTRY_COUNT, visible);
     bs_ui_draw_hint("SELECT=open  BACK=exit");
     bs_gfx_present();
 }
@@ -137,27 +130,32 @@ static void draw_menu(int cursor, bool caps_ok) {
 
 static void app_wifi_run(const bs_arch_t* arch) {
     int  cursor  = 0;
-    bool dirty   = true;
 
     int err = bs_wifi_init(arch);
     bool caps_ok = (err == 0) &&
                    (bs_wifi_caps() & (BS_WIFI_CAP_INJECT | BS_WIFI_CAP_SNIFF)) != 0;
 
+    bool dirty = true;
+    uint32_t prev_ms = arch->millis();
+    uint32_t last_anim_ms = prev_ms;
     for (;;) {
+        uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
+
         bs_nav_id_t nav;
         while ((nav = bs_nav_poll()) != BS_NAV_NONE) {
             switch (nav) {
                 case BS_NAV_UP:   case BS_NAV_PREV:
-                    cursor = (cursor + WIFI_ENTRY_COUNT - 1) % WIFI_ENTRY_COUNT;
-                    dirty = true; break;
+                    cursor = (cursor + WIFI_ENTRY_COUNT - 1) % WIFI_ENTRY_COUNT; dirty = true; break;
                 case BS_NAV_DOWN: case BS_NAV_NEXT:
-                    cursor = (cursor + 1) % WIFI_ENTRY_COUNT;
-                    dirty = true; break;
+                    cursor = (cursor + 1) % WIFI_ENTRY_COUNT; dirty = true; break;
                 case BS_NAV_SELECT:
                     if (caps_ok) {
                         bs_gfx_clear(g_bs_theme.bg);
                         k_entries[cursor].run(arch);
                         dirty = true;
+                        last_anim_ms = arch->millis();
                     }
                     break;
                 case BS_NAV_BACK:
@@ -167,12 +165,13 @@ static void app_wifi_run(const bs_arch_t* arch) {
             }
         }
 
-        if (dirty) {
-            dirty = false;
+        bool anim_due = bs_ui_carousel_enabled() && (uint32_t)(now - last_anim_ms) >= 100U;
+        if (dirty || anim_due) {
             draw_menu(cursor, caps_ok);
+            dirty = false;
+            if (anim_due) last_anim_ms = now;
         }
-
-        arch->delay_ms(5);
+        arch->delay_ms((uint32_t)bs_board_ui_idle_delay_ms());
     }
 }
 

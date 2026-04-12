@@ -26,12 +26,6 @@ def _extract_version(build_flags):
     return "0.0.0"
 
 
-def _device_name(pioenv):
-    # Last dash-segment: esp32s3-tpager → tpager, native → native
-    parts = pioenv.split("-")
-    return parts[-1] if len(parts) > 1 else pioenv
-
-
 def copy_artifact(source, target, env):  # noqa: ARG001
     build_dir   = env.subst("$BUILD_DIR")
     project_dir = env.subst("$PROJECT_DIR")
@@ -39,7 +33,7 @@ def copy_artifact(source, target, env):  # noqa: ARG001
     platform    = env.subst("$PIOPLATFORM")
 
     version = _extract_version(env.get("BUILD_FLAGS", []))
-    device  = _device_name(pioenv)
+    device  = pioenv
 
     bin_dir = os.path.join(project_dir, "bin")
     os.makedirs(bin_dir, exist_ok=True)

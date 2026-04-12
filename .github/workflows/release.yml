@@ -7,10 +7,6 @@ on:
         description: 'Release tag (e.g. v0.3.16)'
         required: true
         type: string
-      notes:
-        description: 'Release notes / changelog'
-        required: true
-        type: string
       latest:
         description: 'Mark as latest release'
         required: false
@@ -25,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        env: [esp32s3-tpager, native, native-headless, esp32s3-cardputer]
+        env: [native-headless, native, esp32s3-tpager, esp32s3-cardputer, esp32s3-tdongle-s3, esp32s3-heltec-v3]
 
     steps:
       - name: Checkout (with submodules)
@@ -56,20 +52,29 @@ jobs:
       - name: Build (${{ matrix.env }})
         working-directory: firmware
         run: pio run -e ${{ matrix.env }}
-        # patch_libnet80211.py runs automatically as a pre-build extra_script.
-        # On native targets the patch is a no-op (guarded by chip detection).
 
       - name: Locate artifact
         id: artifact
         working-directory: firmware
+        shell: bash
         run: |
-          BIN=$(ls bin/BeamStalker-*-${{ matrix.env == 'esp32s3-tpager' && 'tpager' || matrix.env }}.bin 2>/dev/null | head -1)
-          # post_build.py names native bins with the last env segment too
+          case "${{ matrix.env }}" in
+            esp32s3-tpager) SUFFIX="tpager" ;;
+            *) SUFFIX="${{ matrix.env }}" ;;
+          esac
+
+          BIN="$(ls bin/BeamStalker-*-${SUFFIX}.bin 2>/dev/null | head -1)"
           if [ -z "$BIN" ]; then
-            BIN=$(ls bin/BeamStalker-*.bin | head -1)
+            BIN="$(ls bin/BeamStalker-*.bin 2>/dev/null | head -1)"
           fi
+
+          if [ -z "$BIN" ]; then
+            echo "No build artifact found" >&2
+            exit 1
+          fi
+
           echo "path=firmware/${BIN}" >> "$GITHUB_OUTPUT"
-          echo "name=$(basename ${BIN})"  >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$BIN")" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -93,8 +98,8 @@ jobs:
         with:
           tag_name: ${{ inputs.tag }}
           name: BeamStalker ${{ inputs.tag }}
-          body: ${{ inputs.notes }}
+          body_path: RELEASE.md
           files: artifacts/*
           draft: false
           prerelease: false
-          make_latest: ${{ inputs.latest }}
+          make_latest: ${{ inputs.latest && 'true' || 'false' }}

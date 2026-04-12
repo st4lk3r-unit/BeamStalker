@@ -1,19 +1,14 @@
 /*
- * ble_scan.c - BLE passive scanner.
+ * ble_scan.c - BLE scanner UI (thin wrapper over ble_scan_svc).
  *
- * Maintains a deduplicated list of up to BLE_SCAN_MAX_DEVS devices.
- * Displays: MAC address, vendor tag, RSSI.
- * Scrollable with UP/DOWN; refreshes automatically on new or updated device.
- *
- * Navigation:
- *   UP / PREV  - scroll up
- *   DOWN / NEXT- scroll down
- *   BACK       - stop scan and return
+ * All scan logic lives in ble_scan_svc.c.
+ * This file owns: draw, scroll, input.
  */
 #include "bs/bs_ble.h"
 #ifdef BS_HAS_BLE
 
 #include "apps/ble/ble_scan.h"
+#include "apps/ble/ble_scan_svc.h"
 #include "apps/ble/ble_common.h"
 
 #include "bs/bs_arch.h"
@@ -22,160 +17,97 @@
 #include "bs/bs_theme.h"
 #include "bs/bs_ui.h"
 
-#include <string.h>
 #include <stdio.h>
 
-/* ── Device list ────────────────────────────────────────────────────────── */
-
-#define BLE_SCAN_MAX_DEVS 32
-
-typedef struct {
-    uint8_t      addr[6];
-    int8_t       rssi;
-    ble_vendor_t vendor;
-} scan_dev_t;
-
-static scan_dev_t s_devs[BLE_SCAN_MAX_DEVS];
-static int        s_dev_count  = 0;
-static bool       s_scan_dirty = false;
-
-static void scan_cb(const bs_ble_scan_result_t* r, void* ctx) {
-    (void)ctx;
-
-    /* Dedup: update RSSI if MAC already known */
-    for (int i = 0; i < s_dev_count; i++) {
-        if (memcmp(s_devs[i].addr, r->addr, 6) == 0) {
-            s_devs[i].rssi = r->rssi;
-            s_scan_dirty   = true;
-            return;
-        }
-    }
-
-    if (s_dev_count >= BLE_SCAN_MAX_DEVS) return;
-
-    int idx = s_dev_count++;
-    memcpy(s_devs[idx].addr, r->addr, 6);
-    s_devs[idx].rssi   = r->rssi;
-    s_devs[idx].vendor = ble_detect_vendor(r->adv.data, r->adv.len);
-    s_scan_dirty = true;
-}
-
-/* ── Draw ───────────────────────────────────────────────────────────────── */
+/* ── Draw ────────────────────────────────────────────────────────────────── */
 
 static void draw_scan(int scroll, int cursor) {
-    int ts  = bs_ui_text_scale();
-    int ts2 = ts > 1 ? ts - 1 : 1;
-    int sw  = bs_gfx_width();
-    int cy  = bs_ui_content_y();
-    int lh  = bs_gfx_text_h(ts) + bs_gfx_text_h(ts2) + 6;
+    float ts  = bs_ui_text_scale();
+    int   cy  = bs_ui_content_y();
+    int   lh  = bs_ui_menu_row_h(ts);
+    int   cnt = ble_scan_svc_count();
 
     bs_gfx_clear(g_bs_theme.bg);
 
     char hdr[32];
-    snprintf(hdr, sizeof(hdr), "BLE Scanner [%d]", s_dev_count);
+    snprintf(hdr, sizeof hdr, "BLE Scanner [%d]", cnt);
     bs_ui_draw_header(hdr);
 
-    if (s_dev_count == 0) {
+    if (cnt == 0) {
         bs_gfx_text(8, cy, "Scanning...", g_bs_theme.dim, ts);
         bs_ui_draw_hint("BACK=exit");
         bs_gfx_present();
         return;
     }
 
-    int hint_h  = bs_gfx_text_h(ts2) + 6;
-    int visible = (bs_gfx_height() - cy - hint_h) / lh;
-    if (visible < 1) visible = 1;
+    int visible = bs_ui_menu_visible(ts);
 
-    for (int i = 0; i < visible && (scroll + i) < s_dev_count; i++) {
+    for (int i = 0; i < visible && (scroll + i) < cnt; i++) {
         int idx = scroll + i;
-        bool sel = (idx == cursor);
-        int  y   = cy + i * lh;
-
-        if (sel)
-            bs_gfx_fill_rect(0, y - 2, sw, lh - 1, g_bs_theme.dim);
-
-        scan_dev_t* d = &s_devs[idx];
+        const ble_scan_dev_t* d = ble_scan_svc_dev(idx);
+        if (!d) continue;
 
         char mac[18];
-        snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+        snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X",
                  d->addr[0], d->addr[1], d->addr[2],
                  d->addr[3], d->addr[4], d->addr[5]);
 
-        bs_color_t mc = sel ? g_bs_theme.accent  : g_bs_theme.primary;
-        bs_color_t dc = sel ? g_bs_theme.primary : g_bs_theme.dim;
-
-        bs_gfx_text(8, y, mac, mc, ts);
-
         char detail[32];
-        snprintf(detail, sizeof(detail), "%s  %d dBm",
+        snprintf(detail, sizeof detail, "%s  %d dBm",
                  ble_vendor_str(d->vendor), (int)d->rssi);
-        bs_gfx_text(8, y + bs_gfx_text_h(ts) + 2, detail, dc, ts2);
+
+        bs_ui_draw_menu_row(cy + i * lh, mac, detail, idx == cursor, ts);
     }
 
+    bs_ui_draw_scroll_arrows(scroll, cnt, visible);
     bs_ui_draw_hint("UP/DN=scroll  BACK=exit");
     bs_gfx_present();
 }
 
-/* ── Scroll helper ──────────────────────────────────────────────────────── */
+/* ── Scroll helper ───────────────────────────────────────────────────────── */
 
 static void update_scroll(int cursor, int* scroll) {
-    int ts2     = bs_ui_text_scale() > 1 ? bs_ui_text_scale() - 1 : 1;
-    int ts      = bs_ui_text_scale();
-    int lh      = bs_gfx_text_h(ts) + bs_gfx_text_h(ts2) + 6;
-    int hint_h  = bs_gfx_text_h(ts2) + 6;
-    int visible = (bs_gfx_height() - bs_ui_content_y() - hint_h) / lh;
-    if (visible < 1) visible = 1;
-
-    if (cursor < *scroll)              *scroll = cursor;
-    if (cursor >= *scroll + visible)   *scroll = cursor - visible + 1;
-    if (*scroll < 0)                   *scroll = 0;
+    int visible = bs_ui_menu_visible(bs_ui_text_scale());
+    bs_ui_list_clamp_scroll(cursor, scroll, ble_scan_svc_count(), visible);
 }
 
-/* ── Run ────────────────────────────────────────────────────────────────── */
+/* ── Public entry point ──────────────────────────────────────────────────── */
 
 void ble_scan_run(const bs_arch_t* arch) {
-    memset(s_devs, 0, sizeof(s_devs));
-    s_dev_count  = 0;
-    s_scan_dirty = false;
+    ble_scan_svc_init(arch);
+    ble_scan_svc_start();
 
-    int  cursor = 0;
-    int  scroll = 0;
-    bool dirty  = true;
+    int cursor = 0, scroll = 0;
 
-    bs_ble_scan_start(scan_cb, NULL);
-
+    uint32_t prev_ms = arch->millis();
     for (;;) {
+        uint32_t now = arch->millis();
+        bs_ui_advance_ms(now - prev_ms);
+        prev_ms = now;
+
         bs_nav_id_t nav;
         while ((nav = bs_nav_poll()) != BS_NAV_NONE) {
             switch (nav) {
                 case BS_NAV_UP: case BS_NAV_PREV:
-                    if (cursor > 0) { cursor--; dirty = true; }
-                    break;
+                    if (cursor > 0) cursor--; break;
                 case BS_NAV_DOWN: case BS_NAV_NEXT:
-                    if (cursor < s_dev_count - 1) { cursor++; dirty = true; }
-                    break;
+                    if (cursor < ble_scan_svc_count() - 1) cursor++; break;
                 case BS_NAV_BACK:
-                    bs_ble_scan_stop();
+                    ble_scan_svc_stop();
                     return;
                 default: break;
             }
         }
 
-        if (s_scan_dirty) {
-            s_scan_dirty = false;
-            dirty = true;
-        }
+        ble_scan_svc_clear_dirty();
 
-        if (dirty) {
-            dirty = false;
-            if (cursor >= s_dev_count && s_dev_count > 0)
-                cursor = s_dev_count - 1;
-            if (cursor < 0) cursor = 0;
-            update_scroll(cursor, &scroll);
-            draw_scan(scroll, cursor);
-        }
+        int cnt = ble_scan_svc_count();
+        if (cursor >= cnt && cnt > 0) cursor = cnt - 1;
+        if (cursor < 0) cursor = 0;
+        update_scroll(cursor, &scroll);
+        draw_scan(scroll, cursor);   /* always redraw — carousel needs it */
 
-        arch->delay_ms(10);
+        arch->delay_ms(16);
     }
 }
 
