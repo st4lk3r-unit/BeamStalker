@@ -1,3 +1,11 @@
+# v0.3.19
+> Added new targets
+
+## Features
+- Added M5Stack-Cardputer
+## Fix
+- kbd abstractoin with SIC
+
 # v0.3.18
 > Added new targets, implemeneted attack svc for better konsole/UI support
 
