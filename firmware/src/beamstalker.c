@@ -20,7 +20,6 @@
  *
  * Build flags:
  *   BS_HEADLESS      - skip menu/boot, poll konsole only
- *   BS_NO_APP_DVD    - exclude DVD app
  *   BS_NO_APP_LOG    - exclude Log app
  *   BS_NO_APP_TOP    - exclude Top app
  *   BS_NO_APP_WIFI   - exclude WiFi app (auto-excluded if no WiFi backend)
@@ -43,9 +42,7 @@
 #include "bs_boot.h"
 
 #include "apps/app_settings.h"
-#ifndef BS_NO_APP_DVD
-#  include "apps/app_dvd.h"
-#endif
+#include "apps/app_fileman.h"
 #ifndef BS_NO_APP_LOG
 #  include "apps/app_log.h"
 #endif
@@ -144,9 +141,7 @@ static const bs_app_t* const k_apps[] = {
 #ifndef BS_NO_APP_LOG
     &app_log,
 #endif
-#ifndef BS_NO_APP_DVD
-    &app_dvd,
-#endif
+    &app_fileman,
     &app_settings,
 #ifndef BS_NO_APP_TOP
     &app_top,
@@ -806,6 +801,55 @@ static void sniff_pcap_open(const char* path) {
     s_sniff_ctx.pcap_count = 0;
 }
 
+typedef struct {
+    uint32_t max_id;
+} sniff_pcap_id_scan_t;
+
+static bool sniff_parse_decimal_id(const char* name, uint32_t* out_id) {
+    static const char prefix[] = "sniff-";
+    if (!name || strncmp(name, prefix, sizeof(prefix) - 1) != 0) return false;
+
+    const char* p = name + sizeof(prefix) - 1;
+    if (*p < '0' || *p > '9') return false;
+
+    uint32_t id = 0;
+    while (*p >= '0' && *p <= '9') {
+        id = id * 10U + (uint32_t)(*p - '0');
+        p++;
+    }
+    if (*p != '-') return false;
+    if (out_id) *out_id = id;
+    return true;
+}
+
+static int sniff_pcap_id_scan_cb(const bs_dir_entry_t* ent, void* user) {
+    sniff_pcap_id_scan_t* scan = (sniff_pcap_id_scan_t*)user;
+    uint32_t id = 0;
+    if (ent && !ent->is_dir && sniff_parse_decimal_id(ent->name, &id) && id > scan->max_id) {
+        scan->max_id = id;
+    }
+    return 0;
+}
+
+static uint32_t sniff_next_pcap_id(void) {
+    sniff_pcap_id_scan_t scan = {0};
+    bs_fs_mkdir_p(BS_PATH_SNIFF);
+    (void)bs_fs_list_dir(BS_PATH_SNIFF, sniff_pcap_id_scan_cb, &scan);
+    return scan.max_id + 1U;
+}
+
+static void sniff_make_default_pcap_path(char* out, size_t out_sz, uint32_t now_ms) {
+    if (!out || out_sz == 0) return;
+    uint32_t id = sniff_next_pcap_id();
+    for (int i = 0; i < 1000; i++, id++) {
+        snprintf(out, out_sz, BS_PATH_SNIFF "/sniff-%06lu-%010lu.pcap",
+                 (unsigned long)id, (unsigned long)now_ms);
+        if (!bs_fs_exists(out)) return;
+    }
+    snprintf(out, out_sz, BS_PATH_SNIFF "/sniff-%06lu-%010lu.pcap",
+             (unsigned long)id, (unsigned long)now_ms);
+}
+
 static void sniff_pcap_write_pkt(const uint8_t* data, uint16_t len, uint32_t ts_ms) {
     if (!s_sniff_ctx.pcap_f) return;
     uint32_t hdr[4];
@@ -1179,7 +1223,7 @@ static int cmd_wifi(struct konsole* ks, int argc, char** argv) {
             kon_printf(ks,
                 "Output:\r\n"
                 "  -v / --verbose             per-frame hex+ASCII dump\r\n"
-                "  --pcap [FILE]              write .pcap to SD (default: wifi/sniff/sniff.pcap)\r\n"
+                "  --pcap [FILE]              write .pcap to SD (default: wifi/sniff/sniff-<seq>-<timestamp>.pcap)\r\n"
                 "Frame-type filter (last --type wins):\r\n"
                 "  --type mgmt|ctrl|data      all frames of that type\r\n");
             kon_printf(ks,
@@ -1206,6 +1250,7 @@ static int cmd_wifi(struct konsole* ks, int argc, char** argv) {
         uint8_t     channel   = 0;
         uint32_t    hop_ms    = 500;
         const char* pcap_path = NULL;
+        char default_pcap_path[64];
 
         for (int i = 2; i < argc; i++) {
             if (!strcmp(argv[i],"--ch") && i+1<argc) {
@@ -1217,7 +1262,12 @@ static int cmd_wifi(struct konsole* ks, int argc, char** argv) {
             } else if (!strcmp(argv[i],"--verbose")||!strcmp(argv[i],"-v")) {
                 s_sniff_ctx.verbose=true;
             } else if (!strcmp(argv[i],"--pcap")) {
-                pcap_path=(i+1<argc&&argv[i+1][0]!='-')?argv[++i]:BS_PATH_SNIFF "/sniff.pcap";
+                if (i + 1 < argc && argv[i + 1][0] != '-') {
+                    pcap_path = argv[++i];
+                } else {
+                    sniff_make_default_pcap_path(default_pcap_path, sizeof default_pcap_path, s_arch->millis());
+                    pcap_path = default_pcap_path;
+                }
             } else if (!strcmp(argv[i],"--type") && i+1<argc) {
                 const char* t=argv[++i];
                 if      (bs_stricmp(t,"mgmt")    ==0){s_sniff_ctx.filt_type=0;s_sniff_ctx.filt_subtype=SNIFF_FTYPE_ALL;}

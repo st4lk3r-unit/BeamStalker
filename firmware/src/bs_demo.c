@@ -1,5 +1,5 @@
 /*
- * bs_demo.c - DVD-bounce idle animation.
+ * bs_demo.c - BEAMSTALKER idle bounce animation.
  *
  * BEAMSTALKER banner drifts and bounces around the screen.
  * Uses the SGFX FB+presenter pattern (via bs_gfx):
