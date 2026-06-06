@@ -1,10 +1,7 @@
-# v0.3.18
-> Added new targets, implemeneted attack svc for better konsole/UI support
+# v0.3.19
+> Added new targets
 
 ## Features
-- Added Lilygo-T-dongle-S3 target
-- Added Heltec-v3 target
-- Added EAPOL interception suuport
+- Added M5Stack-Cardputer
 ## Fix
-- Improved UI (text carrousset)
-- Fixed some abstraction leakage
+- kbd abstractoin with SIC
