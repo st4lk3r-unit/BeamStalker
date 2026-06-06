@@ -1,6 +1,6 @@
 #pragma once
 /*
- * bs_demo.h - BeamStalker idle animation: DVD-style BEAMSTALKER bounce.
+ * bs_demo.h - BeamStalker idle animation: BEAMSTALKER idle bounce.
  *
  * A large "BEAMSTALKER" banner drifts across the display and bounces off
  * edges, cycling through the orange/amber palette on each collision -

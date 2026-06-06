@@ -8,6 +8,26 @@ extern "C" {
 
 typedef void* bs_file_t;
 
+/*
+ * Normal bs_fs paths are rooted under BeamStalker's app directory
+ * (for example, "wifi/sniff" maps to /BeamStalker/wifi/sniff on SD).
+ * Paths starting with BS_FS_RAW_PREFIX bypass that app directory and address
+ * the mounted media root directly.  This is intended for tools such as the
+ * on-device File Manager that need to browse the whole SD card.
+ *
+ * Example raw root path: BS_FS_RAW_ROOT -> SD card root.
+ */
+#define BS_FS_RAW_PREFIX "sd:"
+#define BS_FS_RAW_ROOT   "sd:/"
+
+typedef struct {
+    char name[64];
+    bool is_dir;
+    long size;
+} bs_dir_entry_t;
+
+typedef int (*bs_fs_list_cb)(const bs_dir_entry_t* ent, void* user);
+
 /* Call once at startup (after arch init). Returns 0 on success, <0 on error. */
 int  bs_fs_init(void);
 
@@ -23,8 +43,11 @@ long      bs_fs_tell(bs_file_t f);
 void      bs_fs_close(bs_file_t f);
 
 bool bs_fs_exists(const char* path);
+bool bs_fs_is_dir(const char* path);
 int  bs_fs_mkdir_p(const char* path);   /* creates all intermediate dirs */
 int  bs_fs_remove(const char* path);
+int  bs_fs_rename(const char* old_path, const char* new_path);
+int  bs_fs_list_dir(const char* path, bs_fs_list_cb cb, void* user);
 
 /* Returns file size in bytes, or -1 if file does not exist / error. */
 long bs_fs_file_size(const char* path);

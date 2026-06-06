@@ -1,7 +1,8 @@
 /*
  * bs_fs_sdcard.c - bs_fs backend for Arduino SD card.
  *
- * Stores files under /BeamStalker/ on the SD card.
+ * Stores normal BeamStalker files under /BeamStalker/ on the SD card.
+ * Paths beginning with BS_FS_RAW_PREFIX ("sd:") address the SD root directly.
  */
 #ifdef BS_FS_SDCARD
 #include "bs/bs_fs.h"
@@ -38,9 +39,74 @@ static bool     s_sd_spi_begun = false;
 
 #define BS_FS_ROOT "/BeamStalker"
 
-static void full_path(char* dst, size_t sz, const char* path) {
+static bool is_raw_path(const char* path) {
+    return path && strncmp(path, BS_FS_RAW_PREFIX, strlen(BS_FS_RAW_PREFIX)) == 0;
+}
+
+static void raw_full_path(char* dst, size_t sz, const char* path) {
+    const char* p = path ? path + strlen(BS_FS_RAW_PREFIX) : "/";
+    if (!p || !p[0]) p = "/";
+    if (p[0] == '/') snprintf(dst, sz, "%s", p);
+    else snprintf(dst, sz, "/%s", p);
+}
+
+static void app_full_path(char* dst, size_t sz, const char* path) {
     if (path && path[0] == '/') snprintf(dst, sz, BS_FS_ROOT "%s", path);
     else snprintf(dst, sz, BS_FS_ROOT "/%s", path ? path : "");
+}
+
+static void full_path(char* dst, size_t sz, const char* path) {
+    if (is_raw_path(path)) raw_full_path(dst, sz, path);
+    else app_full_path(dst, sz, path);
+}
+
+static int mkdir_p_full(const char* full) {
+    if (!full || !full[0]) return -1;
+
+    char tmp[256];
+    snprintf(tmp, sizeof tmp, "%s", full);
+
+    size_t len = strlen(tmp);
+    while (len > 1 && tmp[len - 1] == '/') {
+        tmp[--len] = '\0';
+    }
+
+    if (!strcmp(tmp, "/")) return 0;
+
+    for (char* p = tmp + 1; *p; ++p) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (tmp[0] && !SD.exists(tmp)) {
+            if (!SD.mkdir(tmp) && !SD.exists(tmp)) {
+                *p = '/';
+                return -1;
+            }
+        }
+        *p = '/';
+    }
+
+    if (!SD.exists(tmp)) {
+        if (!SD.mkdir(tmp) && !SD.exists(tmp)) return -1;
+    }
+    return 0;
+}
+
+static void ensure_parent_dir_full(const char* full) {
+    if (!full || !full[0]) return;
+
+    char dir[256];
+    snprintf(dir, sizeof dir, "%s", full);
+
+    char* slash = strrchr(dir, '/');
+    if (!slash) return;
+    if (slash == dir) return;   /* parent is SD root */
+
+    *slash = '\0';
+    mkdir_p_full(dir);
+}
+
+static bool mode_writes(const char* mode) {
+    return mode && (mode[0] == 'w' || mode[0] == 'a' || strchr(mode, '+') != NULL);
 }
 
 static bool        s_available   = false;
@@ -111,9 +177,15 @@ bool bs_fs_available(void) { return s_available; }
 bs_file_t bs_fs_open(const char* path, const char* mode) {
     char fp[256]; full_path(fp, sizeof fp, path);
     const char* sdmode = "r";
-    if (mode[0] == 'w') sdmode = "w";
-    else if (mode[0] == 'a') sdmode = "a";
-    else if (mode[0] == 'r' && mode[1] == '+') sdmode = "r+";
+    if (mode && mode[0] == 'w') sdmode = "w";
+    else if (mode && mode[0] == 'a') sdmode = "a";
+    else if (mode && mode[0] == 'r' && mode[1] == '+') sdmode = "r+";
+
+    /* Arduino SD.open() will not create missing parent directories.  Make
+     * write/append paths robust so callers can open nested files such as
+     * wifi/sniff/sniff-<seq>-<timestamp>.pcap after a fresh format/card. */
+    if (mode_writes(mode)) ensure_parent_dir_full(fp);
+
     File f = SD.open(fp, sdmode);
     if (!f) return NULL;
     File* fh = new File(f);
@@ -153,14 +225,98 @@ bool bs_fs_exists(const char* path) {
     return SD.exists(fp);
 }
 
+bool bs_fs_is_dir(const char* path) {
+    char fp[256]; full_path(fp, sizeof fp, path);
+    File f = SD.open(fp, "r");
+    if (!f) return false;
+    bool is_dir = f.isDirectory();
+    f.close();
+    return is_dir;
+}
+
 int bs_fs_mkdir_p(const char* path) {
     char fp[256]; full_path(fp, sizeof fp, path);
-    return SD.mkdir(fp) ? 0 : -1;
+    return mkdir_p_full(fp);
+}
+
+static bool is_protected_remove_target(const char* full) {
+    return !full || !full[0] || strcmp(full, "/") == 0;
+}
+
+static int remove_full_recursive(const char* full) {
+    if (is_protected_remove_target(full)) return -1;
+
+    File f = SD.open(full, "r");
+    if (!f) {
+        return SD.remove(full) ? 0 : -1;
+    }
+
+    bool is_dir = f.isDirectory();
+    if (!is_dir) {
+        f.close();
+        return SD.remove(full) ? 0 : -1;
+    }
+
+    for (;;) {
+        File child = f.openNextFile();
+        if (!child) break;
+
+        char child_path[256];
+        const char* child_name = child.name();
+        if (child_name && child_name[0] == '/') {
+            snprintf(child_path, sizeof child_path, "%s", child_name);
+        } else {
+            snprintf(child_path, sizeof child_path, "%s/%s", full, child_name ? child_name : "");
+        }
+        child.close();
+
+        if (child_path[0] == '\0' || remove_full_recursive(child_path) != 0) {
+            f.close();
+            return -1;
+        }
+    }
+
+    f.close();
+    return SD.rmdir(full) ? 0 : -1;
 }
 
 int bs_fs_remove(const char* path) {
     char fp[256]; full_path(fp, sizeof fp, path);
-    return SD.remove(fp) ? 0 : -1;
+    return remove_full_recursive(fp);
+}
+
+int bs_fs_rename(const char* old_path, const char* new_path) {
+    char old_fp[256], new_fp[256];
+    full_path(old_fp, sizeof old_fp, old_path);
+    full_path(new_fp, sizeof new_fp, new_path);
+    return SD.rename(old_fp, new_fp) ? 0 : -1;
+}
+
+int bs_fs_list_dir(const char* path, bs_fs_list_cb cb, void* user) {
+    if (!cb) return -1;
+    char fp[256]; full_path(fp, sizeof fp, path);
+    File dir = SD.open(fp, "r");
+    if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return -1; }
+
+    File f = dir.openNextFile();
+    while (f) {
+        bs_dir_entry_t ent;
+        memset(&ent, 0, sizeof ent);
+        const char* nm = f.name();
+        const char* slash = strrchr(nm, '/');
+        if (slash) nm = slash + 1;
+        snprintf(ent.name, sizeof ent.name, "%s", nm ? nm : "?");
+        ent.is_dir = f.isDirectory();
+        ent.size = ent.is_dir ? 0 : (long)f.size();
+        f.close();
+        if (ent.name[0] != '\0' && cb(&ent, user) != 0) {
+            dir.close();
+            return 1;
+        }
+        f = dir.openNextFile();
+    }
+    dir.close();
+    return 0;
 }
 
 long bs_fs_file_size(const char* path) {

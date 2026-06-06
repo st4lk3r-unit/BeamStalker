@@ -50,6 +50,11 @@ bool bs_fs_exists(const char* path) {
     return false;
 }
 
+bool bs_fs_is_dir(const char* path) {
+    (void)path;
+    return false;
+}
+
 int bs_fs_mkdir_p(const char* path) {
     (void)path;
     return -1;
@@ -57,6 +62,16 @@ int bs_fs_mkdir_p(const char* path) {
 
 int bs_fs_remove(const char* path) {
     (void)path;
+    return -1;
+}
+
+int bs_fs_rename(const char* old_path, const char* new_path) {
+    (void)old_path; (void)new_path;
+    return -1;
+}
+
+int bs_fs_list_dir(const char* path, bs_fs_list_cb cb, void* user) {
+    (void)path; (void)cb; (void)user;
     return -1;
 }
 
