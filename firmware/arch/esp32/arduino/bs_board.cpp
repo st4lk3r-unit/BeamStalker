@@ -25,8 +25,15 @@ extern "C" int bs_board_platform_init(const bs_arch_t* arch) {
 #  endif
 #endif
 #ifdef BS_USE_SIC
+#  if defined(I2C_SDA_PIN) && defined(I2C_SCL_PIN)
     sic_i2c_begin(I2C_SDA_PIN, I2C_SCL_PIN, 400000);
-    sic_begin_legacy(&BS_SIC_BOARD, NULL);
+#  endif
+    const sic_board_t* board = sic_board_default();
+#  if defined(BS_SIC_BOARD)
+    if (!board) board = &BS_SIC_BOARD;
+#  endif
+    sic_begin_opts_t opts = { 0, 0 };
+    sic_begin_legacy(board, &opts);
 #endif
     return 0;
 }
