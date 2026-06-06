@@ -16,6 +16,8 @@
 #define BS_GPIOKEY_LONG_MS     650
 #define BS_GPIOKEY_DOUBLE_MS   300
 
+#define BS_BACKLIGHT_PWM      1
+
 /* Panel/backlight traits (official LilyGO factory example uses GPIO38, active-low) */
 #define BS_SGFX_BL_ACTIVE_LOW  0
 

@@ -12,6 +12,7 @@
 #include "bs/bs_hw.h"
 #include "bs/bs_assets.h"
 #include "beamstalker.h"
+#include "board.h"
 
 #include <stdio.h>
 #include <stdbool.h>
@@ -363,6 +364,12 @@ int bs_ui_brightness(void) {
 void bs_ui_set_brightness(int pct) {
     if (pct < 0)   pct = 0;
     if (pct > 100) pct = 100;
+#if defined(BS_BACKLIGHT_GPIO_ONLY)
+    /* These boards expose only a reliable on/off backlight gate.  Non-100 PWM
+     * values can black the LCD, so normalize any non-zero request to full-on.
+     */
+    if (pct > 0) pct = 100;
+#endif
     s_brightness = pct;
     bs_gfx_set_brightness(pct);
 }

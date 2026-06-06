@@ -9,3 +9,4 @@
 - some icon bitmaps were reworked.
 - dvd test app was dropped as it became useless
 - EAPOL deinit wifi stack not working
+- Cardputer brightness fixed to max
