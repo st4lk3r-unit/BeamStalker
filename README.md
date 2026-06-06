@@ -19,8 +19,8 @@ BeamStalker was initially bootstrapped from the [Neutrino](https://github.com/st
 | `esp32s3-tpager` | ✅ | 480×222 ST7796 | keyboard + encoder | main handheld target |
 | `esp32s3-tdongle-s3` | ✅ | 160×80 ST7735 | single button | compact dongle target |
 | `esp32s3-cardputer` | ✅ | 240×135 ST7789 | keyboard | compact keyboard target |
+| `esp32s3-cardputer-adv` | ✅ | 240×135 ST7789 | TCA8418 keyboard | Cardputer-ADV target via updated SIC |
 | `esp32s3-heltec-v3` | ✅ | 128×64 SSD1306 | single button | minimal OLED target |
-| `cardputer-adv` | 🚧 | TBD | TBD | work in progress |
 
 > BeamStalker is multi-target by design, but not “universal” yet.  
 > The goal is a shared firmware architecture across supported boards, not fake portability.
@@ -74,6 +74,21 @@ If you already cloned the repository without submodules:
 git submodule update --init --recursive
 ```
 
+BeamStalker now expects the updated SIC revision that contains `sic_board_default()`,
+`sic_key_poll()`, `SIC_TARGET_CARDPUTER_ADV`, the fixed Cardputer-ADV TCA8418 map,
+and the newer ES8311/SD/IR board profiles. After pushing/pinning that SIC commit,
+update the submodule pointer:
+
+```bash
+git submodule update --init --recursive
+cd firmware/lib/SIC
+git fetch origin
+git checkout <updated-sic-commit>
+cd ../../..
+git add firmware/lib/SIC
+git commit -m "Bump SIC for Cardputer-ADV support"
+```
+
 You will also need:
 
 * Python
@@ -97,6 +112,9 @@ pio run -e esp32s3-tdongle-s3
 
 # M5Stack Cardputer
 pio run -e esp32s3-cardputer
+
+# M5Stack Cardputer-ADV
+pio run -e esp32s3-cardputer-adv
 
 # Heltec WiFi LoRa 32 V3
 pio run -e esp32s3-heltec-v3

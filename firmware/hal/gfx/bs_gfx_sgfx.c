@@ -66,7 +66,7 @@ static void bs_variant_display_power(bool on) {
 static void bs_variant_display_power(bool on) { (void)on; }
 #endif
 
-#if defined(VARIANT_CARDPUTER)
+#if defined(VARIANT_CARDPUTER) || defined(VARIANT_CARDPUTER_ADV)
 static void bs_cardputer_panel_fixup(void) {
     if (!s_dev.bus || !s_dev.bus->ops || !s_dev.bus->ops->write_cmd) return;
     (void)s_dev.bus->ops->write_cmd(s_dev.bus, 0x21); /* INVON */
