@@ -146,7 +146,7 @@ static uint8_t           s_mac_filter_addr[6];
 static wifi_pps_t        s_pps;
 static uint32_t          s_total_bytes;
 static bs_pcap_t*        s_pcap;
-static char              s_pcap_path[32];
+static char              s_pcap_path[64];
 
 
 /* ── Frame filter predicate ──────────────────────────────────────────────── */
@@ -204,11 +204,57 @@ static void pkt_cb(const uint8_t* data, uint16_t len,
 
 /* ── PCAP ────────────────────────────────────────────────────────────────── */
 
-static void pcap_open_next(void) {
-    if (!bs_fs_available()) { s_pcap = NULL; return; }
+typedef struct {
+    uint32_t max_id;
+} pcap_id_scan_t;
+
+static bool parse_decimal_sniff_id(const char* name, uint32_t* out_id) {
+    static const char prefix[] = "sniff-";
+    if (!name || strncmp(name, prefix, sizeof(prefix) - 1) != 0) return false;
+
+    const char* p = name + sizeof(prefix) - 1;
+    if (*p < '0' || *p > '9') return false;
+
+    uint32_t id = 0;
+    while (*p >= '0' && *p <= '9') {
+        id = id * 10U + (uint32_t)(*p - '0');
+        p++;
+    }
+    if (*p != '-') return false;
+    if (out_id) *out_id = id;
+    return true;
+}
+
+static int pcap_id_scan_cb(const bs_dir_entry_t* ent, void* user) {
+    pcap_id_scan_t* scan = (pcap_id_scan_t*)user;
+    uint32_t id = 0;
+    if (ent && !ent->is_dir && parse_decimal_sniff_id(ent->name, &id) && id > scan->max_id) {
+        scan->max_id = id;
+    }
+    return 0;
+}
+
+static uint32_t pcap_next_id(void) {
+    pcap_id_scan_t scan = {0};
     bs_fs_mkdir_p(BS_PATH_SNIFF);
-    for (int i = 0; i < 9999; i++) {
-        snprintf(s_pcap_path, sizeof s_pcap_path, BS_PATH_SNIFF "/wifi_%04d.pcap", i);
+    (void)bs_fs_list_dir(BS_PATH_SNIFF, pcap_id_scan_cb, &scan);
+    return scan.max_id + 1U;
+}
+
+static void pcap_open_next(uint32_t now_ms) {
+    if (!bs_fs_available()) { s_pcap = NULL; return; }
+
+    /*
+     * Most small boards do not have a trusted wall-clock at boot, so the
+     * timestamp component is the platform monotonic millisecond counter.
+     * The capture id is decimal/incremental and zero-padded so filenames sort
+     * newest-last by id: wifi/sniff/sniff-000001-<timestamp>.pcap
+     */
+    uint32_t id = pcap_next_id();
+    for (int i = 0; i < 1000; i++, id++) {
+        snprintf(s_pcap_path, sizeof s_pcap_path,
+                 BS_PATH_SNIFF "/sniff-%06lu-%010lu.pcap",
+                 (unsigned long)id, (unsigned long)now_ms);
         if (!bs_fs_exists(s_pcap_path)) { s_pcap = bs_pcap_open(s_pcap_path); return; }
     }
     s_pcap = NULL;
@@ -221,7 +267,7 @@ static void start_sniff(const bs_arch_t* arch) {
     wifi_pps_init(&s_pps);
     s_total_bytes = 0;
     disp_reset();
-    pcap_open_next();
+    pcap_open_next(arch->millis());
     sniffer_svc_init(arch);
     sniffer_svc_start(s_chmode == SNF_CH_FIXED ? s_channel : 0, 500, pkt_cb, NULL);
     s_ui_state = SNF_RUNNING;

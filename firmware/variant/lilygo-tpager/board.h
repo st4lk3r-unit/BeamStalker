@@ -9,6 +9,10 @@
 #define BS_BOARD_CAP_FLAGS   (BS_BOARD_CAP_FAST_UI | BS_BOARD_CAP_SIC | BS_BOARD_CAP_ROTARY | BS_BOARD_CAP_XL9555_DIAG | BS_BOARD_CAP_SHARED_SD_SPI)
 #define BS_BOARD_UI_IDLE_DELAY_MS 1
 
+/* Backlight control. */
+#define BS_BACKLIGHT_AW9364   1
+#define BS_SGFX_BL_ACTIVE_LOW 0
+
 /* SIC board descriptor fallback. Normal init uses sic_board_default(), selected
  * by -DSIC_TARGET_TPAGER in platformio.ini. */
 #ifdef BS_USE_SIC

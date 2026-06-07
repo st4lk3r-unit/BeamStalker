@@ -18,6 +18,7 @@
 #include "bs/bs_ui.h"
 #include "bs/bs_board.h"
 #include "beamstalker.h"
+#include "board.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -39,9 +40,15 @@ static const char* const k_scale_names[] = {"Small","Mid-S","Medium","Mid-L","La
 static const float       k_scale_vals[]  = {1.0f, 1.5f, 2.0f, 2.5f, 3.0f};
 #define N_SCALES 5
 
+#if defined(BS_BACKLIGHT_GPIO_ONLY)
+static const char* const k_bright_names[] = {"100%"};
+static const int         k_bright_vals[]  = {100};
+#define N_BRIGHT 1
+#else
 static const char* const k_bright_names[] = {"25%","50%","75%","100%"};
 static const int         k_bright_vals[]  = {25, 50, 75, 100};
 #define N_BRIGHT 4
+#endif
 
 static const char* const k_voltage_names[] = {"Off", "On"};
 #define N_VOLTAGE 2
@@ -368,7 +375,7 @@ static void settings_run(const bs_arch_t* arch) {
     s_palette_idx    = 0;
     s_border_idx     = (int)g_bs_theme.border;
     s_text_scale_idx = 0;
-    s_bright_idx     = 3;
+    s_bright_idx     = N_BRIGHT - 1;
     s_voltage_idx    = bs_ui_show_voltage() ? 1 : 0;
     s_carousel_idx   = bs_ui_carousel_enabled() ? 1 : 0;
     s_header_brand_idx = bs_ui_header_brand_mode() ? 1 : 0;

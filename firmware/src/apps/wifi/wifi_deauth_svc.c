@@ -276,7 +276,11 @@ void deauth_svc_scan_aps(void) {
     s_ap_count = 0;
     s_state    = DEAUTH_SVC_SCANNING;
     svc_log("Scanning for APs...");
-    bs_wifi_scan_start();
+    int rc = bs_wifi_scan_start();
+    if (rc != 0) {
+        svc_log("Scan start failed rc=%d", rc);
+        s_state = DEAUTH_SVC_AP_READY;
+    }
 }
 
 void deauth_svc_sniff_clients(void) {

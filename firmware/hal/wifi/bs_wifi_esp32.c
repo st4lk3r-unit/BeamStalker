@@ -93,11 +93,38 @@ static void esp_prom_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
                s_frame_ctx);
 }
 
+/* Return the radio to a predictable STA/scan-ready state after monitor mode.
+ * ESP32 can otherwise keep the previous promiscuous callback/channel/mode
+ * residue around, which makes the next scan appear to finish with no APs. */
+static void restore_sta_idle(void) {
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+
+    s_frame_cb  = NULL;
+    s_frame_ctx = NULL;
+
+    esp_wifi_disconnect();
+    s_connected = false;
+
+    /* Keep the driver allocated/running, but force normal STA mode. */
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    s_ap_active = false;
+    s_state = BS_WIFI_STATE_IDLE;
+}
+
 /* ── Shared promiscuous entry (used by sniff and monitor) ───────────────── */
 
 static int enter_promiscuous(uint8_t channel,
                               bs_wifi_frame_cb_t cb, void* ctx,
                               uint32_t filter_mask) {
+    if (s_state == BS_WIFI_STATE_OFF && bs_wifi_init(NULL) != 0) return -2;
+
+    /* Abort any pending STA scan before switching to monitor/promiscuous. */
+    esp_wifi_scan_stop();
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_mode(WIFI_MODE_STA);
     esp_wifi_disconnect();       /* drop any active association */
     s_connected = false;
 
@@ -205,8 +232,15 @@ bs_wifi_state_t bs_wifi_state(void) {
 /* ── Scan ────────────────────────────────────────────────────────────────── */
 
 int bs_wifi_scan_start(void) {
+    if (s_state == BS_WIFI_STATE_OFF && bs_wifi_init(NULL) != 0) return -2;
     if (!(s_caps & BS_WIFI_CAP_SCAN))     return -1;
     if (s_state == BS_WIFI_STATE_MONITOR) return -2;
+
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+    s_frame_cb  = NULL;
+    s_frame_ctx = NULL;
+    esp_wifi_set_mode(WIFI_MODE_STA);
 
     /* "CN" + MANUAL: 13 channels; MANUAL prevents the STA from reverting to
      * the AP's advertised country after association (which would drop ch12/13). */
@@ -412,10 +446,8 @@ int bs_wifi_monitor_start(uint8_t channel,
 }
 
 void bs_wifi_monitor_stop(void) {
-    esp_wifi_set_promiscuous(false);
-    s_frame_cb  = NULL;
-    s_frame_ctx = NULL;
-    s_state = BS_WIFI_STATE_IDLE;
+    if (s_state == BS_WIFI_STATE_OFF) return;
+    restore_sta_idle();
 }
 
 /* ── Sniff (data frames only) ────────────────────────────────────────────── */
