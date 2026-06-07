@@ -8,6 +8,14 @@
 #define BS_BOARD_CAP_FLAGS   (BS_BOARD_CAP_FAST_UI | BS_BOARD_CAP_SIC | BS_BOARD_CAP_SHARED_SD_SPI)
 #define BS_BOARD_UI_IDLE_DELAY_MS 1
 
+/* Backlight control.
+ * GPIO38 is a display/backlight power gate on Cardputer-class boards.
+ * Treat it as on/off only: PWM below 100% can black the LCD and, on
+ * Stamp-S3A/ADV, shares power with the RGB LED rail.
+ */
+#define BS_BACKLIGHT_GPIO_ONLY 1
+#define BS_SGFX_BL_ACTIVE_LOW  0
+
 #ifdef BS_USE_SIC
 #  include <sic/sic_board.h>
 #  define BS_SIC_BOARD SIC_BOARD_CARDPUTER
