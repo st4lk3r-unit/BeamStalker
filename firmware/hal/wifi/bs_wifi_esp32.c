@@ -402,6 +402,16 @@ int bs_wifi_ap_client_list(bs_wifi_sta_t* out, int max_count) {
     return count;
 }
 
+int bs_wifi_ap_get_bssid(uint8_t mac[6]) {
+    if (!(s_caps & BS_WIFI_CAP_AP) || !mac) return -1;
+    if (!s_ap_active) { memset(mac, 0, 6); return -2; }
+    if (esp_wifi_get_mac(WIFI_IF_AP, mac) != ESP_OK) {
+        memset(mac, 0, 6);
+        return -2;
+    }
+    return 0;
+}
+
 int bs_wifi_ap_set_dns_ip(const uint8_t ip[4]) {
     if (!(s_caps & BS_WIFI_CAP_AP) || !ip) return -1;
     if (!s_ap_netif)

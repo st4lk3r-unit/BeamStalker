@@ -87,6 +87,17 @@ int bs_wifi_get_ip(char* buf, size_t len) {
     return -1;
 }
 
+int bs_wifi_ap_start(const char* ssid, uint8_t ch, const char* password)
+     { (void)ssid; (void)ch; (void)password; return -1; }
+void bs_wifi_ap_stop(void)                         {}
+int  bs_wifi_ap_client_count(void)                 { return -1; }
+int  bs_wifi_ap_client_list(bs_wifi_sta_t* out, int max_count)
+     { (void)out; (void)max_count; return -1; }
+int  bs_wifi_ap_get_bssid(uint8_t mac[6])          { (void)mac; return -1; }
+int  bs_wifi_ap_set_dns_ip(const uint8_t ip[4])    { (void)ip; return -1; }
+int  bs_wifi_ap_set_captive_portal_uri(const char* uri)
+     { (void)uri; return -1; }
+
 /* Unsupported capabilities — return -1 cleanly */
 
 int  bs_wifi_monitor_start(uint8_t ch, bs_wifi_frame_cb_t cb, void* ctx)

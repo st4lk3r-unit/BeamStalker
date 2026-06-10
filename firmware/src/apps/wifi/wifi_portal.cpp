@@ -3,12 +3,12 @@
  *
  * Captive portal trigger mechanism:
  *
- *   1. Arduino WiFi.softAP() is used instead of raw IDF — it properly
- *      configures the DHCP server to hand out 192.168.4.1 as both gateway
- *      AND DNS server, so the catch-all DNS actually intercepts OS probes.
+ *   1. The BeamStalker WiFi backend owns SoftAP creation and DHCP/netif
+ *      details.  The portal app only layers DNS + HTTP on top, so it does
+ *      not depend on Arduino's global WiFi singleton.
  *
  *   2. DHCP Option 114 (Captive Portal URI) is set via
- *      WiFi.softAPenableDHCPCP(true) when arduino-esp32 >= 3.x is in use.
+ *      the bs_wifi_ap_set_captive_portal_uri() backend hook when supported.
  *      This informs Android 11+ and iOS 14+ of the portal URL in the DHCP
  *      offer itself, triggering the popup without any HTTP probing.
  *
@@ -217,13 +217,7 @@ extern "C" void wifi_portal_cred_clear(void) { s_cred_count = 0; }
 
 extern "C" void wifi_portal_get_bssid(uint8_t mac[6]) {
     if (!mac) return;
-    if (!s_active) { memset(mac, 0, 6); return; }
-    String bssid = WiFi.softAPmacAddress();
-    int v[6] = {0};
-    if (sscanf(bssid.c_str(), "%x:%x:%x:%x:%x:%x",
-               &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) == 6) {
-        for (int i = 0; i < 6; i++) mac[i] = (uint8_t)v[i];
-    } else {
+    if (!s_active || bs_wifi_ap_get_bssid(mac) != 0) {
         memset(mac, 0, 6);
     }
 }

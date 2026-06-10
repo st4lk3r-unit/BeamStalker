@@ -165,6 +165,10 @@ int  bs_wifi_ap_client_count(void);
 /* Copy up to max_count associated station MAC addresses into out[].        */
 int  bs_wifi_ap_client_list(bs_wifi_sta_t* out, int max_count);
 
+/* Copy this SoftAP interface BSSID/MAC into mac[6]. Returns 0 on success,
+ * <0 when AP mode is unsupported or not active.                            */
+int  bs_wifi_ap_get_bssid(uint8_t mac[6]);
+
 /* Override the DHCP-advertised DNS server for the SoftAP. ip must point to
  * 4 bytes in network order (for example {192,168,4,1}).                    */
 int  bs_wifi_ap_set_dns_ip(const uint8_t ip[4]);

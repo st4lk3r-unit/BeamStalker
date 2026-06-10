@@ -36,9 +36,9 @@ typedef struct {
  *
  * Internally:
  *   - calls bs_wifi_monitor_stop() to exit any prior monitor mode
- *   - uses Arduino WiFi.softAP() for reliable DHCP/DNS (AP IP = DNS server)
- *   - enables DHCP Option 114 (Captive Portal URI) on arduino-esp32 >= 3.x
- *     so devices learn the portal URL without HTTP probing
+ *   - uses bs_wifi_ap_start() for SoftAP ownership and netif lifecycle
+ *   - sets DHCP DNS + Captive Portal URI through bs_wifi backend hooks
+ *     when supported, so devices learn the portal URL without HTTP probing
  *   - starts DNSServer (port 53, catch-all) and WebServer (port 80)
  *   - serves a "Network Login" credential-capture form on /
  *   - all OS probe endpoints (Android /generate_204, iOS /hotspot-detect.html,

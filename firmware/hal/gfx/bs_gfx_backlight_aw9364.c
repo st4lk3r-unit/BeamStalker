@@ -1,13 +1,14 @@
 /*
- * bs_gfx_backlight_aw9364.c - board-specific LCD backlight control.
+ * bs_gfx_backlight_aw9364.c - ESP32 SGFX LCD backlight control.
  *
- * Historical note:
- *   This file used to assume every SGFX_PIN_BL board had an AW9364-style
- *   single-wire pulse-count LED driver.  That is only true for boards that
- *   explicitly select BS_BACKLIGHT_AW9364.  Cardputer/Cardputer-ADV use GPIO38
- *   as the LCD backlight gate/PWM input; on Stamp-S3A boards the same rail also
- *   powers the RGB LED, so AW9364 pulse trains on GPIO38 can make the RGB LED
- *   flicker or latch a random colour.
+ * This backend is selected by board traits, not by board names:
+ *   BS_BACKLIGHT_AW9364    -> one-wire AW9364 pulse-count LED driver
+ *   BS_BACKLIGHT_GPIO_ONLY -> reliable on/off gate only
+ *   BS_BACKLIGHT_PWM       -> generic ESP32 LEDC PWM output
+ *
+ * Keep SoC/board details in variant/board.h or build flags.  The generic
+ * PWM defaults below deliberately use LEDC timer/channel 0 because it exists
+ * across ESP32 families, including ESP32-C6.  Variants can override them.
  */
 #if defined(PORT_ARDUINO) && defined(SGFX_PIN_BL) && SGFX_PIN_BL >= 0
 
@@ -77,17 +78,24 @@ void bs_gfx_backlight_hw(int pct) {
 #ifndef BS_BACKLIGHT_PWM_FREQ_HZ
 #  define BS_BACKLIGHT_PWM_FREQ_HZ 5000
 #endif
+#ifndef BS_BACKLIGHT_PWM_RES_BITS
+#  define BS_BACKLIGHT_PWM_RES_BITS 10
+#endif
 #ifndef BS_BACKLIGHT_PWM_BITS
 #  define BS_BACKLIGHT_PWM_BITS LEDC_TIMER_10_BIT
 #endif
 #ifndef BS_BACKLIGHT_PWM_TIMER
-#  define BS_BACKLIGHT_PWM_TIMER LEDC_TIMER_3
+#  define BS_BACKLIGHT_PWM_TIMER 0
 #endif
 #ifndef BS_BACKLIGHT_PWM_CHANNEL
-#  define BS_BACKLIGHT_PWM_CHANNEL LEDC_CHANNEL_7
+#  define BS_BACKLIGHT_PWM_CHANNEL 0
 #endif
 
 static bool s_pwm_ready = false;
+
+static inline uint32_t bl_pwm_max_duty(void) {
+    return (1UL << BS_BACKLIGHT_PWM_RES_BITS) - 1UL;
+}
 
 static void bl_pwm_init(void) {
     if (s_pwm_ready) return;
@@ -107,7 +115,7 @@ static void bl_pwm_init(void) {
         .channel    = BS_BACKLIGHT_PWM_CHANNEL,
         .intr_type  = LEDC_INTR_DISABLE,
         .timer_sel  = BS_BACKLIGHT_PWM_TIMER,
-        .duty       = BS_SGFX_BL_ACTIVE_LOW ? 1023 : 0,
+        .duty       = BS_SGFX_BL_ACTIVE_LOW ? bl_pwm_max_duty() : 0,
         .hpoint     = 0,
     };
     (void)ledc_channel_config(&ch);
@@ -120,7 +128,7 @@ void bs_gfx_backlight_hw(int pct) {
 
     bl_pwm_init();
 
-    const uint32_t max_duty = 1023U;
+    const uint32_t max_duty = bl_pwm_max_duty();
     uint32_t duty = ((uint32_t)pct * max_duty) / 100U;
     if (BS_SGFX_BL_ACTIVE_LOW) duty = max_duty - duty;
 

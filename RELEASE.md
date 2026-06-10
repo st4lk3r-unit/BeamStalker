@@ -1,12 +1,9 @@
-# v0.3.20
-> Added file manager, fixed workflow, beautyfied
+# v0.3.21
+> Added new target, fixed abstraction leakage
 
 ## Features
-- Added File Manager app to allow browsing, editing, deleting and so on on the SD card or current FS.
-- Added EAPOL deauth sub menu for granular control
+- Added Waveshare-esp32c6-lcd-1.47 target
 ## Fix
-- Wifi sniffer not creating file.
-- some icon bitmaps were reworked.
-- dvd test app was dropped as it became useless
-- EAPOL deinit wifi stack not working
-- Cardputer brightness fixed to max
+- Wifi backend abstraction leakage
+- BL handling on ST7789 abstraction leakage
+- fixed the bypass script to handle c6 family
