@@ -1,0 +1,167 @@
+name: Build Merged bin
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "ESP32-S3 board to build"
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - esp32s3-tpager
+          - esp32s3-tdongle-s3
+          - esp32s3-cardputer
+          - esp32s3-cardputer-adv
+          - esp32s3-heltec-v3
+
+permissions:
+  contents: read
+
+jobs:
+  build-merged:
+    name: merged images (${{ inputs.target }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout including submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO and esptool
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'platformio>=6.1,<7' 'esptool>=4.7,<5'
+
+      - name: Build selected firmware target(s)
+        working-directory: firmware
+        shell: bash
+        env:
+          SELECTED_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if [[ "$SELECTED_TARGET" == all ]]; then
+            targets=(
+              esp32s3-tpager
+              esp32s3-tdongle-s3
+              esp32s3-cardputer
+              esp32s3-cardputer-adv
+              esp32s3-heltec-v3
+            )
+          else
+            targets=("$SELECTED_TARGET")
+          fi
+          for target in "${targets[@]}"; do
+            echo "::group::Building $target"
+            pio run -e "$target"
+            echo "::endgroup::"
+          done
+
+      - name: Merge and validate flash images
+        working-directory: firmware
+        shell: bash
+        env:
+          SELECTED_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          targets = [
+              'esp32s3-tpager',
+              'esp32s3-tdongle-s3',
+              'esp32s3-cardputer',
+              'esp32s3-cardputer-adv',
+              'esp32s3-heltec-v3',
+          ]
+          selected = os.environ['SELECTED_TARGET']
+          if selected != 'all':
+              if selected not in targets:
+                  raise ValueError(f'Unexpected target: {selected}')
+              targets = [selected]
+
+          destination = Path('dist')
+          destination.mkdir(exist_ok=True)
+          manifest = []
+          framework = Path.home() / '.platformio/packages/framework-arduinoespressif32'
+
+          for target in targets:
+              build = Path('.pio/build') / target
+              app = build / 'firmware.bin'
+              bootloader = build / 'bootloader.bin'
+              partitions = build / 'partitions.bin'
+              ota_candidates = [
+                  build / 'boot_app0.bin',
+                  framework / 'tools/partitions/boot_app0.bin',
+              ]
+              ota = next((p for p in ota_candidates if p.is_file()), None)
+              required = [app, bootloader, partitions]
+              missing = [str(p) for p in required if not p.is_file()]
+              if ota is None:
+                  missing.append('boot_app0.bin (build or Arduino framework)')
+              if missing:
+                  raise FileNotFoundError(f'{target}: missing: {missing}')
+
+              entries = [
+                  (0x0, bootloader),
+                  (0x8000, partitions),
+                  (0xE000, ota),
+                  (0x10000, app),
+              ]
+              for idx, (address, path) in enumerate(entries):
+                  limit = entries[idx + 1][0] if idx + 1 < len(entries) else None
+                  if limit is not None and address + path.stat().st_size > limit:
+                      raise RuntimeError(f'{target}: {path} overlaps next flash component')
+              output = destination / f'BeamStalker-{target}-merged.bin'
+              command = [
+                  sys.executable, '-m', 'esptool',
+                  '--chip', 'esp32s3', 'merge_bin',
+                  '--output', str(output),
+                  '--flash_mode', 'keep',
+                  '--flash_freq', 'keep',
+                  '--flash_size', 'keep',
+              ]
+              for address, path in entries:
+                  command.extend([hex(address), str(path)])
+              print('Merging', target, flush=True)
+              subprocess.run(command, check=True)
+
+              merged = output.read_bytes()
+              for address, path in entries:
+                  original = path.read_bytes()
+                  actual = merged[address:address + len(original)]
+                  if len(actual) != len(original):
+                      raise RuntimeError(f'{target}: truncated {path}')
+                  if actual != original:
+                      # esptool may update SPI flash parameters in image header.
+                      if address == 0 and actual[:2] == original[:2] and actual[4:] == original[4:]:
+                          pass
+                      else:
+                          raise RuntimeError(f'{target}: mismatch at {address:#x}: {path}')
+              manifest.append((hashlib.sha256(merged).hexdigest(), output.name))
+              print(f'Verified {output}: {len(merged)} bytes', flush=True)
+
+          (destination / 'SHA256SUMS.txt').write_text(
+              ''.join(f'{digest}  {filename}\n' for digest, filename in manifest)
+          )
+          PY
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          ls -lh dist/
+
+      - name: Upload Merge image(s)
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeamStalker-merged-${{ inputs.target }}-${{ github.run_number }}
+          path: firmware/dist/
+          if-no-files-found: error
+          retention-days: 30
